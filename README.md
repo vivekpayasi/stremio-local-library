@@ -18,6 +18,8 @@ This addon reuses that certificate. It runs a small Node service on port `12471`
 - scans `~/Media` and `~/Movies` for video files
 - reuses Stremio's own already-IMDb-matched index where possible, falling back to filename parsing
   plus a Cinemeta lookup
+- detects `SxxEyy` in filenames and presents those files as a **series** — one show card, a real
+  episode list with titles and stills, per-episode watch progress and next-episode autoplay
 - serves each file with `Accept-Ranges` / `206 Partial Content` — this is what makes seeking work
 - builds stream URLs from the request's `Host` header, so they follow your Mac's IP automatically
 
@@ -67,10 +69,33 @@ network change so it picks up the updated addon.
 
 Drop files into `~/Media/Movies`. They're picked up within 10 minutes, or immediately on restart.
 
-Filenames matter for matching — `Movie Name (2015).mkv` or `Movie.Name.2015.1080p.mkv` both work.
+Filenames matter for matching:
+
+| Kind | Examples that work |
+| --- | --- |
+| Movie | `Movie Name (2015).mkv`, `Movie.Name.2015.1080p.mkv` |
+| Episode | `Show.Name.S01E03.1080p.mkv`, `Show Name 1x03.mkv`, `Show Name Season 1 Episode 3.mkv` |
+
+Episodes of the same show are grouped automatically, and episode titles, synopses and stills come
+from Cinemeta. Only the episodes you actually have are listed.
+
 Anything under 50 MB is ignored so samples and clips don't clutter the catalog.
 
 External subtitles (`.srt`, `.vtt`, `.ass`, `.sub`) sitting next to a video are served with it.
+
+### Skipping files
+
+Add rules to `~/.stremio-local-addon/ignore.txt`, one per line — a plain string matches anywhere in
+the path, `/slashes/` make it a regex, `#` starts a comment:
+
+```
+Sample.mkv
+/trailer/
+/TB\d{4,}[_-]\d+\.(mp4|mov)$/
+```
+
+This matters more than it sounds: a file with a meaningless name can be matched to a completely
+unrelated title by the Cinemeta search and appear as a bogus card.
 
 ## Managing it
 
@@ -91,6 +116,7 @@ Edit the `CONFIG` block at the top of `~/.stremio-local-addon/addon.mjs`, then r
 | `roots` | `~/Media`, `~/Movies` | folders scanned for media |
 | `rescanMs` | 10 min | how often to rescan |
 | `minBytes` | 50 MB | ignore files smaller than this |
+| `ignoreFile` | `~/.stremio-local-addon/ignore.txt` | per-line skip rules |
 
 ## Troubleshooting
 
@@ -100,7 +126,11 @@ makes the certificate look invalid, and that Private DNS on the TV isn't blockin
 (Cloudflare, NextDNS and AdGuard strip answers that point at private IPs).
 
 **The library is empty.** Check `addon.log`. Files under 50 MB are skipped, and only the
-extensions `.mkv .mp4 .avi .m4v .mov .webm` are scanned.
+extensions `.mkv .mp4 .avi .m4v .mov .webm` are scanned. The log reports how many files were
+skipped and why the rest were grouped as they were.
+
+**Episodes show up as a movie with several "sources".** The `SxxEyy` marker wasn't recognised in
+the filename. Rename to `Show.Name.S01E03.…` and restart the service.
 
 **Playback fails on the TV.** The file has to be decodable by the TV — there is no transcoding.
 H.264 and HEVC with AAC/AC3 are safe; exotic audio like DTS-HD may not play. Embedded PGS
@@ -118,7 +148,7 @@ the addon's URL current. The full addon collection is backed up to
 
 ## Limitations
 
-- Movies only. TV series episodes appear as separate entries rather than a grouped show.
+- Absolute seasons (`E47` with no season marker) and date-based episode naming aren't detected.
 - No transcoding — the client must be able to decode the file natively.
 - LAN only by design. For access across different networks, put both devices on a Tailscale
   network and serve under a `*.ts.net` certificate instead.

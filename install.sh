@@ -84,6 +84,14 @@ ok "Files installed to $INSTALL_DIR"
 mkdir -p "$HOME/Media/Movies"
 ok "Media folder ready at $HOME/Media/Movies"
 
+# Seed the ignore list only if the user does not already have one.
+if [ ! -f "$INSTALL_DIR/ignore.txt" ]; then
+  cp "$SRC_DIR/templates/ignore.txt.example" "$INSTALL_DIR/ignore.txt"
+  ok "Ignore list created at $INSTALL_DIR/ignore.txt"
+else
+  ok "Kept your existing $INSTALL_DIR/ignore.txt"
+fi
+
 mkdir -p "$HOME/Library/LaunchAgents"
 sed -e "s|__NODE__|$NODE|g" -e "s|__DIR__|$INSTALL_DIR|g" \
   "$SRC_DIR/templates/launchagent.plist.template" > "$PLIST"

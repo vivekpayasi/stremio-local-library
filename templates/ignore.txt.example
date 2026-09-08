@@ -1,0 +1,17 @@
+# Local Library — files to skip when scanning.
+#
+# One rule per line. Lines starting with # are comments.
+#   plain text   matches anywhere in the file's full path (case-insensitive)
+#   /regex/      wrapped in slashes, treated as a regular expression
+#
+# Changes take effect on the next rescan (within 10 minutes), or immediately with:
+#   launchctl kickstart -k gui/$(id -u)/com.local.stremio-library
+#
+# Examples:
+#   Sample.mkv
+#   /trailer/i
+#   /\.part\d+\./
+#   /^\/Users\/[^/]+\/Media\/Private\//
+
+# Camera / device exports that get mistaken for films
+/TB\d{4,}[_-]\d+\.(mp4|mov)$/

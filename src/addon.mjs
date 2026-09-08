@@ -17,12 +17,13 @@ import { startAutoHeal } from './autoheal.mjs';
 const HOME = os.homedir();
 
 const CONFIG = {
-  port: 12471,
+  port: Number(process.env.LOCALLIB_PORT ?? 12471),
   roots: [path.join(HOME, 'Media'), path.join(HOME, 'Movies')],
   certFile: path.join(HOME, 'Library/Application Support/stremio-server/httpsCert.json'),
   stremioIndex: path.join(HOME, 'Library/Application Support/stremio-server/localFiles'),
   stremioMeta: path.join(HOME, 'Library/Application Support/stremio-server/localFilesMeta'),
   cacheFile: path.join(HOME, '.stremio-local-addon/cache.json'),
+  ignoreFile: path.join(HOME, '.stremio-local-addon/ignore.txt'),
   cinemeta: 'https://v3-cinemeta.strem.io',
   rescanMs: 10 * 60 * 1000,
   videoExt: new Set(['.mkv', '.mp4', '.avi', '.m4v', '.mov', '.webm']),
@@ -40,10 +41,26 @@ const log = (...a) => console.log(new Date().toISOString(), ...a);
 
 // ---------------------------------------------------------------- library index
 
-let LIBRARY = new Map(); // fileId -> { id, filePath, size, title, year, imdbId, meta, subs[] }
-let CACHE = {};          // "title|year" -> cinemeta meta (persisted, so restarts stay fast)
+let LIBRARY = new Map(); // fileId -> item (movies and episodes alike)
+let SERIES = new Map();  // showId  -> { id, title, year, meta, episodes: Map<"s:e", item[]> }
+let CACHE = {};          // lookup key -> cinemeta result (persisted, so restarts stay fast)
 
 const fileId = (p) => crypto.createHash('sha1').update(p).digest('hex').slice(0, 16);
+
+// Episode numbering, in rough order of how common each form is.
+const EP_PATTERNS = [
+  /\bS(\d{1,2})[\s._-]*E(\d{1,3})\b/i,
+  /\bSeason[\s._-]*(\d{1,2})[\s._-]*Episode[\s._-]*(\d{1,3})\b/i,
+  /\b(\d{1,2})x(\d{1,3})\b/,
+];
+
+function parseEpisode(filename) {
+  for (const re of EP_PATTERNS) {
+    const m = re.exec(filename);
+    if (m) return { season: Number(m[1]), episode: Number(m[2]), at: m.index };
+  }
+  return null;
+}
 
 function cleanTitle(filename) {
   let n = filename.replace(/\.[^.]+$/, '').replace(/[._]+/g, ' ');
@@ -51,10 +68,10 @@ function cleanTitle(filename) {
   const year = ym ? ym[1] : null;
   if (ym) n = n.slice(0, ym.index);
   n = n.replace(
-    /\b(1080p|720p|2160p|4k|uhd|bluray|blu ray|brrip|bdrip|web ?dl|webrip|hdrip|dvdrip|x264|x265|h ?264|h ?265|hevc|10bit|aac|ac3|eac3|dts|truehd|atmos|remux|proper|repack|extended|unrated|yts|rarbg)\b.*$/i,
+    /\b(1080p|720p|2160p|4k|uhd|bluray|blu ray|brrip|bdrip|web ?dl|webrip|hdrip|dvdrip|x264|x265|h ?264|h ?265|hevc|10bit|hdr|dv|aac|ac3|eac3|ddp?5 1|dts|truehd|atmos|remux|proper|repack|extended|unrated|nf|amzn|yts|rarbg)\b.*$/i,
     '',
   );
-  return { title: n.replace(/[[\](){}]/g, ' ').replace(/\s+/g, ' ').trim(), year };
+  return { title: n.replace(/[[\](){}]/g, ' ').replace(/\s+-\s*$/, '').replace(/\s+/g, ' ').trim(), year };
 }
 
 // Stremio's own index has already IMDb-matched anything Spotlight found — reuse that work.
@@ -90,21 +107,61 @@ async function readStremioMeta() {
   return byImdb;
 }
 
-async function cinemetaLookup(title, year) {
-  const key = `${title}|${year ?? ''}`;
+// One line per rule. A bare string matches anywhere in the path, /.../ is a regex, # is a comment.
+async function readIgnorePatterns() {
+  try {
+    const raw = await fsp.readFile(CONFIG.ignoreFile, 'utf8');
+    return raw
+      .split('\n')
+      .map((l) => l.trim())
+      .filter((l) => l && !l.startsWith('#'))
+      .map((l) =>
+        l.length > 2 && l.startsWith('/') && l.endsWith('/')
+          ? new RegExp(l.slice(1, -1), 'i')
+          : new RegExp(l.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i'),
+      );
+  } catch { return []; }
+}
+
+async function cinemetaSearch(type, title, year) {
+  const key = `${type}|${title}|${year ?? ''}`;
   if (CACHE[key] !== undefined) return CACHE[key];
   let found = null;
   try {
-    const url = `${CONFIG.cinemeta}/catalog/movie/top/search=${encodeURIComponent(title)}.json`;
+    const url = `${CONFIG.cinemeta}/catalog/${type}/top/search=${encodeURIComponent(title)}.json`;
     const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
     if (res.ok) {
       const { metas = [] } = await res.json();
       found = (year && metas.find((m) => String(m.releaseInfo ?? '').startsWith(year))) || metas[0] || null;
     }
-  } catch { /* offline — degrade to filename title */ }
+  } catch { /* offline — degrade to the filename title */ }
   CACHE[key] = found;
-  fsp.writeFile(CONFIG.cacheFile, JSON.stringify(CACHE)).catch(() => {});
+  saveCache();
   return found;
+}
+
+// Full series metadata, including per-episode titles, synopses and stills.
+async function cinemetaSeries(imdbId) {
+  const key = `seriesmeta|${imdbId}`;
+  if (CACHE[key] !== undefined) return CACHE[key];
+  let found = null;
+  try {
+    const res = await fetch(`${CONFIG.cinemeta}/meta/series/${imdbId}.json`, {
+      signal: AbortSignal.timeout(10000),
+    });
+    if (res.ok) found = (await res.json())?.meta ?? null;
+  } catch { /* offline */ }
+  CACHE[key] = found;
+  saveCache();
+  return found;
+}
+
+let saveTimer = null;
+function saveCache() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => {
+    fsp.writeFile(CONFIG.cacheFile, JSON.stringify(CACHE)).catch(() => {});
+  }, 2000);
 }
 
 async function walk(dir, out = []) {
@@ -120,8 +177,11 @@ async function walk(dir, out = []) {
 }
 
 async function buildLibrary() {
-  const [matches, stremioMeta] = await Promise.all([readStremioMatches(), readStremioMeta()]);
+  const [matches, stremioMeta, ignore] = await Promise.all([
+    readStremioMatches(), readStremioMeta(), readIgnorePatterns(),
+  ]);
   const next = new Map();
+  let skipped = 0;
 
   for (const root of CONFIG.roots) {
     const all = await walk(root);
@@ -129,17 +189,25 @@ async function buildLibrary() {
     const subs = all.filter((f) => CONFIG.subExt.has(path.extname(f).toLowerCase()));
 
     for (const filePath of videos) {
+      if (ignore.some((re) => re.test(filePath))) { skipped += 1; continue; }
+
       let st;
       try { st = await fsp.stat(filePath); } catch { continue; }
-      if (st.size < CONFIG.minBytes) continue;
+      if (st.size < CONFIG.minBytes) { skipped += 1; continue; }
 
       const base = path.basename(filePath);
-      const { title, year } = cleanTitle(base);
+      const ep = parseEpisode(base);
+      const kind = ep ? 'series' : 'movie';
+
+      // For an episode the show name is whatever precedes the SxxEyy marker.
+      const nameSource = ep ? base.slice(0, ep.at) : base;
+      const { title, year } = cleanTitle(ep ? `${nameSource}.x` : base);
+
       let imdbId = matches.get(filePath) ?? null;
       let meta = imdbId ? stremioMeta.get(imdbId) : null;
 
       if (!meta && title) {
-        const hit = await cinemetaLookup(title, year);
+        const hit = await cinemetaSearch(kind, title, year);
         if (hit) { meta = hit; imdbId = imdbId ?? hit.imdb_id ?? hit.id; }
       }
 
@@ -151,7 +219,9 @@ async function buildLibrary() {
 
       const id = fileId(filePath);
       next.set(id, {
-        id, filePath, size: st.size,
+        id, filePath, size: st.size, kind,
+        season: ep?.season ?? null,
+        episode: ep?.episode ?? null,
         title: meta?.name ?? title ?? base,
         year: meta?.releaseInfo ?? year ?? '',
         imdbId, meta, subs: near,
@@ -161,64 +231,156 @@ async function buildLibrary() {
   }
 
   LIBRARY = next;
-  log(`library: ${LIBRARY.size} file(s)`);
-  for (const it of LIBRARY.values()) log(`   ${it.imdbId ?? '(unmatched)'}  ${it.title}  <- ${it.filename}`);
+  await buildSeries();
+
+  const movies = [...LIBRARY.values()].filter((i) => i.kind === 'movie');
+  log(`library: ${LIBRARY.size} file(s) — ${movies.length} movie file(s), ` +
+      `${SERIES.size} show(s), ${LIBRARY.size - movies.length} episode(s)` +
+      (skipped ? `, ${skipped} skipped` : ''));
+  for (const it of movies) log(`   movie  ${it.imdbId ?? '(unmatched)'}  ${it.title}`);
+  for (const s of SERIES.values()) {
+    const eps = [...s.episodes.values()].flat().length;
+    log(`   series ${s.id}  ${s.title}  (${eps} episode file(s))`);
+  }
+}
+
+// Group episode files into shows, and pull per-episode metadata once per show.
+async function buildSeries() {
+  const shows = new Map();
+  for (const it of LIBRARY.values()) {
+    if (it.kind !== 'series') continue;
+    const showId = it.imdbId ?? `locallib_${crypto.createHash('sha1').update(it.title).digest('hex').slice(0, 16)}`;
+    it.showId = showId;
+    if (!shows.has(showId)) {
+      shows.set(showId, { id: showId, title: it.title, year: it.year, meta: it.meta, episodes: new Map() });
+    }
+    const show = shows.get(showId);
+    const key = `${it.season}:${it.episode}`;
+    if (!show.episodes.has(key)) show.episodes.set(key, []);
+    show.episodes.get(key).push(it);
+  }
+
+  for (const show of shows.values()) {
+    if (!show.id.startsWith('tt')) continue;
+    const full = await cinemetaSeries(show.id);
+    if (full) {
+      show.meta = full;
+      show.title = full.name ?? show.title;
+      // id -> episode record, so we can attach real titles and stills below.
+      show.videoIndex = new Map((full.videos ?? []).map((v) => [`${v.season}:${v.episode}`, v]));
+    }
+  }
+
+  // Best-quality file first within each episode.
+  for (const show of shows.values()) {
+    for (const list of show.episodes.values()) list.sort((a, b) => b.size - a.size);
+  }
+  SERIES = shows;
 }
 
 // ---------------------------------------------------------------- stremio shapes
 
-const catalogId = 'local-library';
+const MOVIE_CATALOG = 'local-library';
+const SERIES_CATALOG = 'local-series';
 
 const manifest = () => ({
   id: 'org.local.library',
-  version: '1.0.0',
+  version: '1.1.0',
   name: 'Local Library',
   description: `Plays media stored on this Mac (${CONFIG.roots.join(', ')}) with full seek support.`,
   logo: 'https://images.metahub.space/logo/medium/tt0405508/img',
   resources: ['catalog', 'meta', 'stream'],
-  types: ['movie'],
-  catalogs: [{
-    type: 'movie',
-    id: catalogId,
-    name: 'Local Library',
-    extra: [{ name: 'search', isRequired: false }, { name: 'skip', isRequired: false }],
-  }],
-  // Respond to normal IMDb pages so local copies appear as a source on the movie's own page,
-  // plus our internal ids for anything that has no IMDb match.
-  idPrefixes: ['tt', 'locallib:'],
+  types: ['movie', 'series'],
+  catalogs: [
+    {
+      type: 'movie', id: MOVIE_CATALOG, name: 'Local Library',
+      extra: [{ name: 'search', isRequired: false }, { name: 'skip', isRequired: false }],
+    },
+    {
+      type: 'series', id: SERIES_CATALOG, name: 'Local Library',
+      extra: [{ name: 'search', isRequired: false }, { name: 'skip', isRequired: false }],
+    },
+  ],
+  // Respond to normal IMDb pages so local copies appear as a source on the title's own page,
+  // plus our internal ids for anything with no IMDb match.
+  idPrefixes: ['tt', 'locallib_'],
   behaviorHints: { configurable: false, adult: false },
 });
 
-const publicId = (it) => it.imdbId ?? `locallib:${it.id}`;
+const publicId = (it) => it.imdbId ?? `locallib_${it.id}`;
 
-function toMeta(it) {
-  const m = it.meta ?? {};
+// "tt123:1:3" -> { showId: "tt123", season: 1, episode: 3 }
+function parseSeriesId(raw) {
+  const parts = raw.split(':');
+  if (parts.length >= 3) {
+    const episode = Number(parts.pop());
+    const season = Number(parts.pop());
+    if (Number.isFinite(season) && Number.isFinite(episode)) {
+      return { showId: parts.join(':'), season, episode };
+    }
+  }
+  return { showId: raw, season: null, episode: null };
+}
+
+function baseMeta(m, id, type, name, year) {
   return {
-    id: publicId(it),
-    type: 'movie',
-    name: it.title,
-    poster: m.poster ?? undefined,
-    background: m.background ?? undefined,
-    logo: m.logo ?? undefined,
-    description: m.description ?? `Local file: ${it.filename}`,
-    releaseInfo: it.year || undefined,
-    imdbRating: m.imdbRating ?? undefined,
-    runtime: m.runtime ?? undefined,
-    genres: m.genres ?? m.genre ?? undefined,
-    cast: m.cast ?? undefined,
-    director: m.director ?? undefined,
+    id, type, name,
+    poster: m?.poster ?? undefined,
+    background: m?.background ?? undefined,
+    logo: m?.logo ?? undefined,
+    description: m?.description ?? undefined,
+    releaseInfo: m?.releaseInfo ?? year ?? undefined,
+    imdbRating: m?.imdbRating ?? undefined,
+    runtime: m?.runtime ?? undefined,
+    genres: m?.genres ?? m?.genre ?? undefined,
+    cast: m?.cast ?? undefined,
+    director: m?.director ?? undefined,
   };
+}
+
+function movieMeta(it) {
+  const meta = baseMeta(it.meta, publicId(it), 'movie', it.title, it.year);
+  meta.description ??= `Local file: ${it.filename}`;
+  return meta;
+}
+
+// Only the episodes actually present on disk — this is a *local* library, so listing
+// episodes that cannot play would be misleading.
+function seriesMeta(show) {
+  const meta = baseMeta(show.meta, show.id, 'series', show.title, show.year);
+  meta.description ??= `${[...show.episodes.values()].flat().length} local episode file(s)`;
+
+  const videos = [];
+  for (const [key, files] of show.episodes) {
+    const [season, episode] = key.split(':').map(Number);
+    const info = show.videoIndex?.get(key);
+    videos.push({
+      id: `${show.id}:${season}:${episode}`,
+      title: info?.name ?? `Episode ${episode}`,
+      name: info?.name ?? `Episode ${episode}`,
+      season, episode,
+      released: info?.released ?? info?.firstAired ?? undefined,
+      thumbnail: info?.thumbnail ?? undefined,
+      overview: info?.overview ?? files[0].filename,
+    });
+  }
+  videos.sort((a, b) => a.season - b.season || a.episode - b.episode);
+  meta.videos = videos;
+  return meta;
 }
 
 function toStream(it, base) {
   const gb = (it.size / 1024 ** 3).toFixed(2);
   const ext = path.extname(it.filePath).toLowerCase();
+  const label = it.kind === 'series' && it.season != null
+    ? `S${String(it.season).padStart(2, '0')}E${String(it.episode).padStart(2, '0')}`
+    : null;
   return {
     url: `${base}/file/${it.id}`,
     name: 'Local Library',
-    title: `${it.filename}\n${gb} GB · direct play from Mac`,
+    title: `${label ? `${label} · ` : ''}${it.filename}\n${gb} GB · direct play from Mac`,
     behaviorHints: {
-      bingeGroup: `locallib-${it.id}`,
+      bingeGroup: it.kind === 'series' ? `locallib-${it.showId}` : `locallib-${it.id}`,
       // Browsers can't play mkv/avi; the Android TV player can. Flagging it lets web
       // clients fall back to transcoding instead of failing silently.
       notWebReady: ext === '.mkv' || ext === '.avi',
@@ -231,10 +393,12 @@ function toStream(it, base) {
   };
 }
 
-// Several files can legitimately map to the same title (different rips of one movie),
-// so this returns every match — they become alternative sources on the movie's page.
-const findAllById = (wanted) =>
-  [...LIBRARY.values()].filter((it) => it.imdbId === wanted || `locallib:${it.id}` === wanted);
+// Several files can legitimately map to one movie (different rips) — return every match,
+// so they become alternative sources on the title's page.
+const findMovies = (wanted) =>
+  [...LIBRARY.values()].filter(
+    (it) => it.kind === 'movie' && (it.imdbId === wanted || `locallib_${it.id}` === wanted),
+  );
 
 // ---------------------------------------------------------------- http plumbing
 
@@ -323,39 +487,71 @@ async function handle(req, res) {
 
   if (p === '/health') {
     return sendJson(res, {
-      ok: true, files: LIBRARY.size, roots: CONFIG.roots, base,
-      items: [...LIBRARY.values()].map((i) => ({ id: publicId(i), title: i.title, file: i.filename })),
+      ok: true, files: LIBRARY.size, shows: SERIES.size, roots: CONFIG.roots, base,
+      movies: [...LIBRARY.values()].filter((i) => i.kind === 'movie')
+        .map((i) => ({ id: publicId(i), title: i.title, file: i.filename })),
+      series: [...SERIES.values()].map((s) => ({
+        id: s.id, title: s.title,
+        episodes: [...s.episodes.keys()].sort((a, b) => {
+          const [as, ae] = a.split(':').map(Number); const [bs, be] = b.split(':').map(Number);
+          return as - bs || ae - be;
+        }),
+      })),
     });
   }
 
-  // /catalog/movie/local-library.json  (optionally .../search=foo.json)
-  let m = p.match(/^\/catalog\/movie\/([^/]+?)(?:\/(.+))?\.json$/);
+  // /catalog/<type>/<id>.json  (optionally .../search=foo.json)
+  let m = p.match(/^\/catalog\/(movie|series)\/([^/]+?)(?:\/(.+))?\.json$/);
   if (m) {
-    if (m[1] !== catalogId) return sendJson(res, { metas: [] });
-    let items = [...LIBRARY.values()];
-    const extra = new URLSearchParams(m[2] ?? '');
-    const q = extra.get('search');
-    if (q) items = items.filter((i) => i.title.toLowerCase().includes(q.toLowerCase()));
-    // One card per title even when several files back it; prefer the entry with real metadata.
-    const byId = new Map();
-    for (const it of items) {
-      const key = publicId(it);
-      if (!byId.has(key) || (!byId.get(key).meta && it.meta)) byId.set(key, it);
+    const [, type, id, extraRaw] = m;
+    const q = new URLSearchParams(extraRaw ?? '').get('search')?.toLowerCase();
+
+    if (type === 'movie' && id === MOVIE_CATALOG) {
+      let items = [...LIBRARY.values()].filter((i) => i.kind === 'movie');
+      if (q) items = items.filter((i) => i.title.toLowerCase().includes(q));
+      // One card per title even when several files back it; prefer the entry with real metadata.
+      const byId = new Map();
+      for (const it of items) {
+        const key = publicId(it);
+        if (!byId.has(key) || (!byId.get(key).meta && it.meta)) byId.set(key, it);
+      }
+      const metas = [...byId.values()].sort((a, b) => a.title.localeCompare(b.title)).map(movieMeta);
+      return sendJson(res, { metas });
     }
-    const metas = [...byId.values()].sort((a, b) => a.title.localeCompare(b.title)).map(toMeta);
-    return sendJson(res, { metas });
+
+    if (type === 'series' && id === SERIES_CATALOG) {
+      let shows = [...SERIES.values()];
+      if (q) shows = shows.filter((s) => s.title.toLowerCase().includes(q));
+      shows.sort((a, b) => a.title.localeCompare(b.title));
+      // Catalog cards do not need the full episode list.
+      const metas = shows.map((s) => { const { videos, ...card } = seriesMeta(s); return card; });
+      return sendJson(res, { metas });
+    }
+    return sendJson(res, { metas: [] });
   }
 
-  m = p.match(/^\/meta\/movie\/(.+)\.json$/);
+  m = p.match(/^\/meta\/(movie|series)\/(.+)\.json$/);
   if (m) {
-    const hits = findAllById(m[1]);
+    const [, type, id] = m;
+    if (type === 'series') {
+      const show = SERIES.get(parseSeriesId(id).showId);
+      return sendJson(res, show ? { meta: seriesMeta(show) } : { meta: null });
+    }
+    const hits = findMovies(id);
     const best = hits.find((h) => h.meta) ?? hits[0];
-    return sendJson(res, best ? { meta: toMeta(best) } : { meta: null });
+    return sendJson(res, best ? { meta: movieMeta(best) } : { meta: null });
   }
 
-  m = p.match(/^\/stream\/movie\/(.+)\.json$/);
+  m = p.match(/^\/stream\/(movie|series)\/(.+)\.json$/);
   if (m) {
-    const hits = findAllById(m[1]);
+    const [, type, id] = m;
+    if (type === 'series') {
+      const { showId, season, episode } = parseSeriesId(id);
+      const show = SERIES.get(showId);
+      const files = show?.episodes.get(`${season}:${episode}`) ?? [];
+      return sendJson(res, { streams: files.map((it) => toStream(it, base)) });
+    }
+    const hits = findMovies(id);
     hits.sort((a, b) => b.size - a.size); // best-quality rip first
     return sendJson(res, { streams: hits.map((it) => toStream(it, base)) });
   }
@@ -422,13 +618,16 @@ async function main() {
     log(`install URL: https://${c0.domain}:${CONFIG.port}/manifest.json`);
 
     // Keep the account's stored install URL pointing at whatever LAN IP we are on now.
-    startAutoHeal({
-      addonId: manifest().id,
-      port: CONFIG.port,
-      certFile: CONFIG.certFile,
-      manifest,
-      log,
-    });
+    // Disabled when running a throwaway instance for testing.
+    if (!process.env.LOCALLIB_NO_AUTOHEAL) {
+      startAutoHeal({
+        addonId: manifest().id,
+        port: CONFIG.port,
+        certFile: CONFIG.certFile,
+        manifest,
+        log,
+      });
+    }
   });
 }
 
