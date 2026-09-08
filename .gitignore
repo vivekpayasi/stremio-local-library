@@ -1,0 +1,8 @@
+# Runtime state — never commit. Some of this is sensitive.
+addon.log
+cache.json
+collection-backups/
+addon-collection-backup.json
+
+# macOS
+.DS_Store
