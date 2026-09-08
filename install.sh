@@ -81,8 +81,8 @@ chmod +x "$INSTALL_DIR/urls.sh"
 ok "Files installed to $INSTALL_DIR"
 
 # The addon scans these by default; create them so a fresh Mac has somewhere to drop media.
-mkdir -p "$HOME/Media/Movies"
-ok "Media folder ready at $HOME/Media/Movies"
+mkdir -p "$HOME/Media/Movies" "$HOME/Media/Shows" "$HOME/Media/Other"
+ok "Media folders ready: Movies, Shows, Other"
 
 # Seed the ignore list only if the user does not already have one.
 if [ ! -f "$INSTALL_DIR/ignore.txt" ]; then

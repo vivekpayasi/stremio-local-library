@@ -19,6 +19,8 @@ const HOME = os.homedir();
 const CONFIG = {
   port: Number(process.env.LOCALLIB_PORT ?? 12471),
   roots: [path.join(HOME, 'Media'), path.join(HOME, 'Movies')],
+  // Anything under here is listed exactly as named, with no IMDb/Cinemeta matching.
+  otherRoots: [path.join(HOME, 'Media', 'Other')],
   certFile: path.join(HOME, 'Library/Application Support/stremio-server/httpsCert.json'),
   stremioIndex: path.join(HOME, 'Library/Application Support/stremio-server/localFiles'),
   stremioMeta: path.join(HOME, 'Library/Application Support/stremio-server/localFilesMeta'),
@@ -73,6 +75,13 @@ function cleanTitle(filename) {
   );
   return { title: n.replace(/[[\](){}]/g, ' ').replace(/\s+-\s*$/, '').replace(/\s+/g, ' ').trim(), year };
 }
+
+// "Other" files keep their own name — no year stripping, no release-tag trimming.
+const lightTitle = (filename) =>
+  filename.replace(/\.[^.]+$/, '').replace(/[._]+/g, ' ').replace(/\s+/g, ' ').trim();
+
+const isOther = (p) =>
+  CONFIG.otherRoots.some((r) => p === r || p.startsWith(r + path.sep));
 
 // Stremio's own index has already IMDb-matched anything Spotlight found — reuse that work.
 async function readStremioMatches() {
@@ -193,20 +202,28 @@ async function buildLibrary() {
 
       let st;
       try { st = await fsp.stat(filePath); } catch { continue; }
-      if (st.size < CONFIG.minBytes) { skipped += 1; continue; }
 
       const base = path.basename(filePath);
-      const ep = parseEpisode(base);
-      const kind = ep ? 'series' : 'movie';
+      const other = isOther(filePath);
+
+      // The size floor keeps samples and clips out of the matched catalogs; anything
+      // deliberately filed under Other is listed whatever its size.
+      if (!other && st.size < CONFIG.minBytes) { skipped += 1; continue; }
+
+      const ep = other ? null : parseEpisode(base);
+      const kind = other ? 'other' : ep ? 'series' : 'movie';
 
       // For an episode the show name is whatever precedes the SxxEyy marker.
       const nameSource = ep ? base.slice(0, ep.at) : base;
-      const { title, year } = cleanTitle(ep ? `${nameSource}.x` : base);
+      const { title, year } = other
+        ? { title: lightTitle(base), year: null }
+        : cleanTitle(ep ? `${nameSource}.x` : base);
 
-      let imdbId = matches.get(filePath) ?? null;
+      let imdbId = other ? null : (matches.get(filePath) ?? null);
       let meta = imdbId ? stremioMeta.get(imdbId) : null;
 
-      if (!meta && title) {
+      // Other files are shown exactly as named, so nothing can mis-match them.
+      if (!other && !meta && title) {
         const hit = await cinemetaSearch(kind, title, year);
         if (hit) { meta = hit; imdbId = imdbId ?? hit.imdb_id ?? hit.id; }
       }
@@ -234,10 +251,13 @@ async function buildLibrary() {
   await buildSeries();
 
   const movies = [...LIBRARY.values()].filter((i) => i.kind === 'movie');
-  log(`library: ${LIBRARY.size} file(s) — ${movies.length} movie file(s), ` +
-      `${SERIES.size} show(s), ${LIBRARY.size - movies.length} episode(s)` +
+  const others = [...LIBRARY.values()].filter((i) => i.kind === 'other');
+  const episodes = LIBRARY.size - movies.length - others.length;
+  log(`library: ${LIBRARY.size} file(s) — ${movies.length} movie(s), ` +
+      `${SERIES.size} show(s) / ${episodes} episode(s), ${others.length} other` +
       (skipped ? `, ${skipped} skipped` : ''));
   for (const it of movies) log(`   movie  ${it.imdbId ?? '(unmatched)'}  ${it.title}`);
+  for (const it of others) log(`   other  ${it.title}`);
   for (const s of SERIES.values()) {
     const eps = [...s.episodes.values()].flat().length;
     log(`   series ${s.id}  ${s.title}  (${eps} episode file(s))`);
@@ -282,10 +302,11 @@ async function buildSeries() {
 
 const MOVIE_CATALOG = 'local-library';
 const SERIES_CATALOG = 'local-series';
+const OTHER_CATALOG = 'local-other';
 
 const manifest = () => ({
   id: 'org.local.library',
-  version: '1.1.0',
+  version: '1.2.0',
   name: 'Local Library',
   description: `Plays media stored on this Mac (${CONFIG.roots.join(', ')}) with full seek support.`,
   logo: 'https://images.metahub.space/logo/medium/tt0405508/img',
@@ -293,11 +314,17 @@ const manifest = () => ({
   types: ['movie', 'series'],
   catalogs: [
     {
-      type: 'movie', id: MOVIE_CATALOG, name: 'Local Library',
+      type: 'movie', id: MOVIE_CATALOG, name: 'Movies',
       extra: [{ name: 'search', isRequired: false }, { name: 'skip', isRequired: false }],
     },
     {
-      type: 'series', id: SERIES_CATALOG, name: 'Local Library',
+      type: 'series', id: SERIES_CATALOG, name: 'Series',
+      extra: [{ name: 'search', isRequired: false }, { name: 'skip', isRequired: false }],
+    },
+    // Home videos and anything else that should be listed verbatim. Typed 'movie' rather than
+    // Stremio's 'other' type so that every client renders it reliably.
+    {
+      type: 'movie', id: OTHER_CATALOG, name: 'Other',
       extra: [{ name: 'search', isRequired: false }, { name: 'skip', isRequired: false }],
     },
   ],
@@ -394,10 +421,12 @@ function toStream(it, base) {
 }
 
 // Several files can legitimately map to one movie (different rips) — return every match,
-// so they become alternative sources on the title's page.
+// so they become alternative sources on the title's page. 'Other' files live in the same
+// namespace: they are addressed by their own locallib_ id and never by an IMDb id.
 const findMovies = (wanted) =>
   [...LIBRARY.values()].filter(
-    (it) => it.kind === 'movie' && (it.imdbId === wanted || `locallib_${it.id}` === wanted),
+    (it) => (it.kind === 'movie' || it.kind === 'other')
+      && (it.imdbId === wanted || `locallib_${it.id}` === wanted),
   );
 
 // ---------------------------------------------------------------- http plumbing
@@ -490,6 +519,8 @@ async function handle(req, res) {
       ok: true, files: LIBRARY.size, shows: SERIES.size, roots: CONFIG.roots, base,
       movies: [...LIBRARY.values()].filter((i) => i.kind === 'movie')
         .map((i) => ({ id: publicId(i), title: i.title, file: i.filename })),
+      other: [...LIBRARY.values()].filter((i) => i.kind === 'other')
+        .map((i) => ({ id: publicId(i), title: i.title, file: i.filename })),
       series: [...SERIES.values()].map((s) => ({
         id: s.id, title: s.title,
         episodes: [...s.episodes.keys()].sort((a, b) => {
@@ -506,8 +537,9 @@ async function handle(req, res) {
     const [, type, id, extraRaw] = m;
     const q = new URLSearchParams(extraRaw ?? '').get('search')?.toLowerCase();
 
-    if (type === 'movie' && id === MOVIE_CATALOG) {
-      let items = [...LIBRARY.values()].filter((i) => i.kind === 'movie');
+    if (type === 'movie' && (id === MOVIE_CATALOG || id === OTHER_CATALOG)) {
+      const kind = id === OTHER_CATALOG ? 'other' : 'movie';
+      let items = [...LIBRARY.values()].filter((i) => i.kind === kind);
       if (q) items = items.filter((i) => i.title.toLowerCase().includes(q));
       // One card per title even when several files back it; prefer the entry with real metadata.
       const byId = new Map();

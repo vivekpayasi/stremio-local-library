@@ -12,6 +12,3 @@
 #   /trailer/i
 #   /\.part\d+\./
 #   /^\/Users\/[^/]+\/Media\/Private\//
-
-# Camera / device exports that get mistaken for films
-/TB\d{4,}[_-]\d+\.(mp4|mov)$/

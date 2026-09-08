@@ -20,6 +20,8 @@ This addon reuses that certificate. It runs a small Node service on port `12471`
   plus a Cinemeta lookup
 - detects `SxxEyy` in filenames and presents those files as a **series** — one show card, a real
   episode list with titles and stills, per-episode watch progress and next-episode autoplay
+- lists anything in `~/Media/Other` verbatim, with no matching at all — for home videos, recordings
+  and clips that aren't films
 - serves each file with `Accept-Ranges` / `206 Partial Content` — this is what makes seeking work
 - builds stream URLs from the request's `Host` header, so they follow your Mac's IP automatically
 
@@ -67,7 +69,17 @@ network change so it picks up the updated addon.
 
 ## Usage
 
-Drop files into `~/Media/Movies`. They're picked up within 10 minutes, or immediately on restart.
+The installer creates three folders. Where you put a file decides how it's treated:
+
+| Folder | Treated as | Matching |
+| --- | --- | --- |
+| `~/Media/Movies` | films | IMDb / Cinemeta lookup by filename |
+| `~/Media/Shows` | episodes | grouped into shows by `SxxEyy` |
+| `~/Media/Other` | listed verbatim | **none** — the filename is the title |
+
+Files are picked up within 10 minutes, or immediately on restart.
+
+### Movies and Shows
 
 Filenames matter for matching:
 
@@ -81,6 +93,15 @@ from Cinemeta. Only the episodes you actually have are listed.
 
 Anything under 50 MB is ignored so samples and clips don't clutter the catalog.
 
+### Other
+
+Put home videos, recordings, or anything without an IMDb entry in `~/Media/Other`. They appear in
+their own **Other** row with the filename as the title, no artwork, and no lookup — so nothing can
+be mis-identified. The 50 MB floor doesn't apply here, so short clips work too.
+
+This is the fix for a real failure mode: a file called `TB00037_1.mp4` was matched by the Cinemeta
+search to *Stargate SG-1*, poster and all. Filing it under `Other` sidesteps matching entirely.
+
 External subtitles (`.srt`, `.vtt`, `.ass`, `.sub`) sitting next to a video are served with it.
 
 ### Skipping files
@@ -91,11 +112,11 @@ the path, `/slashes/` make it a regex, `#` starts a comment:
 ```
 Sample.mkv
 /trailer/
-/TB\d{4,}[_-]\d+\.(mp4|mov)$/
+/\.part\d+\./
 ```
 
-This matters more than it sounds: a file with a meaningless name can be matched to a completely
-unrelated title by the Cinemeta search and appear as a bogus card.
+Use this to exclude files entirely. If you just want a file listed *without* matching, put it in
+`~/Media/Other` instead.
 
 ## Managing it
 
@@ -114,6 +135,7 @@ Edit the `CONFIG` block at the top of `~/.stremio-local-addon/addon.mjs`, then r
 | --- | --- | --- |
 | `port` | `12471` | HTTPS port for the addon |
 | `roots` | `~/Media`, `~/Movies` | folders scanned for media |
+| `otherRoots` | `~/Media/Other` | listed verbatim, never matched |
 | `rescanMs` | 10 min | how often to rescan |
 | `minBytes` | 50 MB | ignore files smaller than this |
 | `ignoreFile` | `~/.stremio-local-addon/ignore.txt` | per-line skip rules |
