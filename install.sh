@@ -16,6 +16,7 @@ LABEL="com.local.stremio-library"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 CERT="$HOME/Library/Application Support/stremio-server/httpsCert.json"
 PORT=12471
+MENUBAR_PLUGIN="stremio-library.30s.sh"
 
 bold() { printf '\033[1m%s\033[0m\n' "$*"; }
 ok()   { printf '  \033[32m✓\033[0m %s\n' "$*"; }
@@ -69,6 +70,12 @@ fi
 CERT_DOMAIN="$(node -e "console.log(JSON.parse(require('fs').readFileSync('$CERT','utf8')).domain)")"
 ok "HTTPS certificate present ($CERT_DOMAIN)"
 
+# The cert is a wildcard for the install hash, so the hostname for THIS network is the live IP
+# plus that hash — the cert's own domain string can still name a previous network's IP.
+LAN_IP="$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || true)"
+[ -n "$LAN_IP" ] || die "No LAN IP address — connect to your wifi, then re-run."
+HOST="$(echo "$LAN_IP" | tr . -).${CERT_DOMAIN#*.}"
+
 # ---------------------------------------------------------------- install
 echo
 bold "Installing"
@@ -98,6 +105,42 @@ sed -e "s|__NODE__|$NODE|g" -e "s|__DIR__|$INSTALL_DIR|g" \
 plutil -lint "$PLIST" >/dev/null || die "Generated launch agent is invalid."
 ok "Launch agent written to $PLIST"
 
+# ---------------------------------------------------------------- menu bar
+# Optional status icon, run by SwiftBar (https://swiftbar.app). Skipped cleanly if declined.
+SWIFTBAR_APP=""
+for d in /Applications "$HOME/Applications"; do
+  [ -d "$d/SwiftBar.app" ] && SWIFTBAR_APP="$d/SwiftBar.app"
+done
+if [ -z "$SWIFTBAR_APP" ]; then
+  if command -v brew >/dev/null 2>&1; then
+    read -r -p "  Add a menu bar status icon? This installs SwiftBar with Homebrew. [Y/n] " reply
+    case "$reply" in
+      [nN]*) warn "Skipped the menu bar icon — re-run this installer any time to add it." ;;
+      *) brew install --cask swiftbar && SWIFTBAR_APP="/Applications/SwiftBar.app" ;;
+    esac
+  else
+    warn "Menu bar icon skipped — install SwiftBar from https://swiftbar.app then re-run to add it."
+  fi
+fi
+if [ -n "$SWIFTBAR_APP" ]; then
+  # Use the plugin folder SwiftBar already has; otherwise give it one, which also spares
+  # the user its first-launch folder picker.
+  PLUGIN_DIR="$(defaults read com.ameba.SwiftBar PluginDirectory 2>/dev/null || true)"
+  if [ -z "$PLUGIN_DIR" ] || [ ! -d "$PLUGIN_DIR" ]; then
+    PLUGIN_DIR="$INSTALL_DIR/menubar"
+    mkdir -p "$PLUGIN_DIR"
+    defaults write com.ameba.SwiftBar PluginDirectory "$PLUGIN_DIR"
+  fi
+  cp "$SRC_DIR/src/menubar.30s.sh" "$PLUGIN_DIR/$MENUBAR_PLUGIN"
+  chmod +x "$PLUGIN_DIR/$MENUBAR_PLUGIN"
+  if pgrep -xq SwiftBar; then
+    open -g "swiftbar://refreshallplugins"
+  else
+    open -g "$SWIFTBAR_APP"
+  fi
+  ok "Menu bar icon installed ($PLUGIN_DIR/$MENUBAR_PLUGIN)"
+fi
+
 # ---------------------------------------------------------------- start
 echo
 bold "Starting the service"
@@ -121,14 +164,14 @@ for _ in $(seq 1 20); do
   sleep 1
 done
 
-STATUS="$(curl -s -m 10 -o /dev/null -w '%{http_code}' "https://$CERT_DOMAIN:$PORT/manifest.json" || true)"
+STATUS="$(curl -s -m 10 -o /dev/null -w '%{http_code}' "https://$HOST:$PORT/manifest.json" || true)"
 [ "$STATUS" = "200" ] && ok "Addon responding over HTTPS" || warn "Addon did not answer over HTTPS yet (got '$STATUS')"
 
 # ---------------------------------------------------------------- done
 echo
 bold "Done"
 echo
-if grep -q "autoheal: INSTALLED\|autoheal: URL updated\|autoheal: account URL already correct" "$INSTALL_DIR/addon.log" 2>/dev/null; then
+if grep -q "autoheal: INSTALLED\|autoheal: URL updated\|autoheal: account entry updated\|autoheal: account URL already correct" "$INSTALL_DIR/addon.log" 2>/dev/null; then
   echo "  The addon has been added to your Stremio account automatically."
   echo "  It will follow this Mac onto any network from now on."
 else
@@ -137,10 +180,14 @@ else
 fi
 echo
 echo "  On your TV:  Settings -> Server -> URL"
-echo "      https://$CERT_DOMAIN:12470/"
+echo "      https://$HOST:12470/"
 echo
-echo "  Whenever you change wifi, run this to see the current URL:"
-echo "      $INSTALL_DIR/urls.sh"
+echo "  Whenever you change wifi, the URL changes. Click the menu bar icon to copy the current"
+echo "  one, or run:  $INSTALL_DIR/urls.sh"
+if [ -n "$SWIFTBAR_APP" ]; then
+  echo
+  echo "  To keep the menu bar icon after a reboot: SwiftBar -> Preferences -> Launch at Login."
+fi
 echo
 echo "  Logs:      tail -f $INSTALL_DIR/addon.log"
 echo "  Uninstall: $SRC_DIR/uninstall.sh"

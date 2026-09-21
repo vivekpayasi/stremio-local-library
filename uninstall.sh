@@ -52,6 +52,13 @@ ok "Service stopped"
 rm -f "$PLIST"
 ok "Launch agent removed"
 
+# The menu bar plugin may live in SwiftBar's own plugin folder, outside $INSTALL_DIR.
+PLUGIN_DIR="$(defaults read com.ameba.SwiftBar PluginDirectory 2>/dev/null || true)"
+if [ -n "$PLUGIN_DIR" ] && [ -f "$PLUGIN_DIR/stremio-library.30s.sh" ]; then
+  rm -f "$PLUGIN_DIR/stremio-library.30s.sh"
+  ok "Menu bar icon removed (SwiftBar itself was left installed)"
+fi
+
 if [ -d "$INSTALL_DIR" ]; then
   read -r -p "Delete $INSTALL_DIR (logs, caches, backups)? [y/N] " reply
   case "$reply" in

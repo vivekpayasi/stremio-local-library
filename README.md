@@ -64,8 +64,28 @@ Settings → Server → URL:
 https://<your-dashed-ip>.<your-hash>.stremio.rocks:12470/
 ```
 
-Run `~/.stremio-local-addon/urls.sh` any time to print the current one. Restart the TV app after a
-network change so it picks up the updated addon.
+Click the menu bar icon to copy the current one, or run `~/.stremio-local-addon/urls.sh` to print
+it. Restart the TV app after a network change so it picks up the updated addon.
+
+### Menu bar icon
+
+The installer offers to add a status icon to the menu bar. It is a small
+[SwiftBar](https://swiftbar.app) plugin, installed with Homebrew; decline and everything else
+works the same.
+
+| Icon colour | Meaning |
+|---|---|
+| green | the addon and Stremio's streaming server are both up |
+| yellow | the addon is up, but Stremio desktop is closed — torrent streams won't play on the TV |
+| red | the addon is not answering |
+| grey | no network, or Stremio has not issued its certificate yet |
+
+Click it for the status of each server, the **TV Server URL** and **addon install URL** for the
+network you are on (click either to copy it), the last library scan and self-heal result, and
+shortcuts to open Stremio, restart the addon, and open the log or the Media folder. It refreshes
+every 30 seconds.
+
+To keep it after a reboot, turn on SwiftBar → Preferences → **Launch at Login**.
 
 ## Usage
 
