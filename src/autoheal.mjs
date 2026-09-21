@@ -1,4 +1,5 @@
-// Keeps this addon's install URL correct in the Stremio account as the Mac moves networks.
+// Keeps this addon's entry correct in the Stremio account: its install URL as the Mac moves
+// networks, the manifest copy clients render from, and its place in the addon order.
 //
 // The stremio.rocks hostname encodes the LAN IP, so the transportUrl stored in the account goes
 // stale on every IP change. The certificate does NOT — it is a wildcard for the install hash and
@@ -59,9 +60,20 @@ async function backup(addons, log) {
   return f;
 }
 
-export function startAutoHeal({ addonId, port, certFile, manifest, intervalMs = 60_000, log }) {
+// Board rows follow addon order and new addons land last, below every other addon's rows.
+// Sitting right after Cinemeta puts the local rows near the top. Pass pinAfter: null to opt out.
+const CINEMETA = 'com.linvo.cinemeta';
+
+function placeAfter(others, entry, anchorId) {
+  const at = anchorId ? others.findIndex((a) => a?.manifest?.id === anchorId) : -1;
+  if (at === -1) return null;
+  return [...others.slice(0, at + 1), entry, ...others.slice(at + 1)];
+}
+
+export function startAutoHeal({ addonId, port, certFile, manifest, intervalMs = 60_000, log, pinAfter = CINEMETA }) {
   let lastUrl = null;      // last URL we know is correct in the account
   let warnedSignedOut = false;
+  let pin = pinAfter;      // cleared if the API turns out not to keep our ordering
 
   async function reconcile(reason) {
     const ip = currentIp();
@@ -86,7 +98,16 @@ export function startAutoHeal({ addonId, port, certFile, manifest, intervalMs = 
 
     const { addons } = await api('addonCollectionGet', authKey, { update: true });
     const mine = addons.filter((a) => a?.manifest?.id === addonId);
-    const correct = mine.length === 1 && mine[0].transportUrl === want;
+    const others = addons.filter((a) => a?.manifest?.id !== addonId);
+    const current = manifest();
+    const isPlaced = (list) => {
+      const anchor = pin ? list.findIndex((a) => a?.manifest?.id === pin) : -1;
+      return anchor === -1 || list[anchor + 1]?.manifest?.id === addonId;
+    };
+    const urlOk = mine.length === 1 && mine[0].transportUrl === want;
+    // Clients render catalog names from the account's copy of the manifest, not from the server.
+    const manifestOk = mine[0]?.manifest?.version === current.version;
+    const correct = urlOk && manifestOk && isPlaced(addons);
 
     if (correct) {
       if (lastUrl !== want) log(`autoheal: account URL already correct -> ${want}`);
@@ -94,13 +115,15 @@ export function startAutoHeal({ addonId, port, certFile, manifest, intervalMs = 
       return;
     }
 
-    const others = addons.filter((a) => a?.manifest?.id !== addonId);
     const entry = {
       ...(mine[0] ?? { transportName: '', flags: { official: false, protected: false } }),
       transportUrl: want,
-      manifest: manifest(),
+      manifest: current,
     };
-    const next = [...others, entry];
+    // Without a pin, keep whatever slot we already hold; a new install goes last.
+    const held = addons.findIndex((a) => a?.manifest?.id === addonId);
+    const next = placeAfter(others, entry, pin)
+      ?? (held === -1 ? [...others, entry] : [...others.slice(0, held), entry, ...others.slice(held)]);
 
     const bk = await backup(addons, log);
     await api('addonCollectionSet', authKey, { addons: next });
@@ -108,12 +131,29 @@ export function startAutoHeal({ addonId, port, certFile, manifest, intervalMs = 
     const verify = await api('addonCollectionGet', authKey, { update: true });
     const ok = verify.addons.some((a) => a?.manifest?.id === addonId && a.transportUrl === want);
     if (!ok) throw new Error('verification failed — collection did not take the new URL');
+    if (verify.addons.length !== next.length) {
+      throw new Error(`verification failed — expected ${next.length} addons, account has ${verify.addons.length}`);
+    }
+    if (!isPlaced(verify.addons)) {
+      // Never fight the API over ordering: that would rewrite the collection every reconcile.
+      log('autoheal: account did not keep the addon order — leaving its position alone');
+      pin = null;
+    }
 
-    log(
-      mine.length === 0
-        ? `autoheal: INSTALLED addon at ${want} (${addons.length} -> ${verify.addons.length} addons, backup ${path.basename(bk)})`
-        : `autoheal: URL updated ${mine[0].transportUrl} -> ${want} (backup ${path.basename(bk)})`,
-    );
+    const changes = [];
+    if (!manifestOk && mine.length) changes.push(`manifest v${mine[0].manifest?.version} -> v${current.version}`);
+    if (!isPlaced(addons) && pin) {
+      changes.push(`moved to position ${verify.addons.findIndex((a) => a?.manifest?.id === addonId) + 1} of ${verify.addons.length}`);
+    }
+    const extra = changes.length ? `; ${changes.join(', ')}` : '';
+    const bkName = path.basename(bk);
+    if (mine.length === 0) {
+      log(`autoheal: INSTALLED addon at ${want} (${addons.length} -> ${verify.addons.length} addons, backup ${bkName})`);
+    } else if (!urlOk) {
+      log(`autoheal: URL updated ${mine[0].transportUrl} -> ${want}${extra} (backup ${bkName})`);
+    } else {
+      log(`autoheal: account entry updated — ${changes.join(', ')} (backup ${bkName})`);
+    }
     lastUrl = want;
   }
 

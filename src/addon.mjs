@@ -306,25 +306,27 @@ const OTHER_CATALOG = 'local-other';
 
 const manifest = () => ({
   id: 'org.local.library',
-  version: '1.2.0',
+  version: '1.3.0',
   name: 'Local Library',
   description: `Plays media stored on this Mac (${CONFIG.roots.join(', ')}) with full seek support.`,
   logo: 'https://images.metahub.space/logo/medium/tt0405508/img',
   resources: ['catalog', 'meta', 'stream'],
   types: ['movie', 'series'],
+  // Clients title a Board row "<catalog name> - <Type>", so the name has to say whose row it is:
+  // these read "Local Library - Movie" / "Local Library - Series", not "Movies - Movie".
   catalogs: [
     {
-      type: 'movie', id: MOVIE_CATALOG, name: 'Movies',
+      type: 'movie', id: MOVIE_CATALOG, name: 'Local Library',
       extra: [{ name: 'search', isRequired: false }, { name: 'skip', isRequired: false }],
     },
     {
-      type: 'series', id: SERIES_CATALOG, name: 'Series',
+      type: 'series', id: SERIES_CATALOG, name: 'Local Library',
       extra: [{ name: 'search', isRequired: false }, { name: 'skip', isRequired: false }],
     },
     // Home videos and anything else that should be listed verbatim. Typed 'movie' rather than
     // Stremio's 'other' type so that every client renders it reliably.
     {
-      type: 'movie', id: OTHER_CATALOG, name: 'Other',
+      type: 'movie', id: OTHER_CATALOG, name: 'Local Library · Other',
       extra: [{ name: 'search', isRequired: false }, { name: 'skip', isRequired: false }],
     },
   ],

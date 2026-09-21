@@ -35,6 +35,14 @@ Stremio's own API, which then syncs to your TV.
 Move to a different wifi and the library just reappears. You only ever update the TV's
 **Server URL** field by hand, because that one is a per-device setting Stremio doesn't sync.
 
+The same watcher keeps the addon placed **right after Cinemeta** in your account. Stremio orders
+the home screen by addon, and a new addon normally lands last, so without this your rows —
+**Local Library - Movie**, **Local Library - Series** and **Local Library · Other - Movie** — would
+sit below every other addon's. It also refreshes the account's copy of the manifest when the addon
+is upgraded. Every write is preceded by a backup in `~/.stremio-local-addon/collection-backups/`,
+and your other addons are never modified. To leave the order alone, pass `pinAfter: null` to
+`startAutoHeal` in `addon.mjs`.
+
 ## Requirements
 
 - macOS
