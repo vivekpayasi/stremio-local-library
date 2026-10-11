@@ -24,10 +24,11 @@ if [ "$DOMAIN" != "$HOST" ]; then
 fi
 echo
 echo "TV  Settings -> Server -> URL :"
-echo "    https://$HOST:12470/"
+echo "    https://$HOST:12472/        (libtorrent server; Stremio's own is :12470)"
 echo
 echo "Desktop  Addons -> paste to install :"
 echo "    https://$HOST:12471/manifest.json"
 echo
+printf 'torrent server   :12472  -> %s\n' "$(curl -s -m 6 -o /dev/null -w 'http=%{http_code} ssl=%{ssl_verify_result}' "https://$HOST:12472/torrentd/health")"
 printf 'streaming server :12470  -> %s\n' "$(curl -s -m 6 -o /dev/null -w 'http=%{http_code} ssl=%{ssl_verify_result}' "https://$HOST:12470/settings")"
 printf 'local library    :12471  -> %s\n' "$(curl -s -m 6 -o /dev/null -w 'http=%{http_code} ssl=%{ssl_verify_result}' "https://$HOST:12471/manifest.json")"

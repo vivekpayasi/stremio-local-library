@@ -47,6 +47,8 @@ and your other addons are never modified. To leave the order alone, pass `pinAft
 
 - macOS
 - **Node.js 22.5 or newer** (uses the built-in `node:sqlite` module)
+- **Python 3.9–3.13** for the torrent server (the installer offers `brew install python@3.13`);
+  libtorrent's prebuilt wheels need macOS 14+ on Apple Silicon, or 15+ on Intel
 - **Stremio desktop** installed, signed in, and run at least once
 - Stremio's **Streaming HTTPS endpoint** enabled — Settings → Streaming → set it to your LAN IP
 
@@ -69,11 +71,43 @@ you typing anything there.
 Settings → Server → URL:
 
 ```
-https://<your-dashed-ip>.<your-hash>.stremio.rocks:12470/
+https://<your-dashed-ip>.<your-hash>.stremio.rocks:12472/
 ```
 
-Click the menu bar icon to copy the current one, or run `~/.stremio-local-addon/urls.sh` to print
-it. Restart the TV app after a network change so it picks up the updated addon.
+That is the torrent server below, not Stremio's own (`:12470`). Click the menu bar icon to copy the
+current one, or run `~/.stremio-local-addon/urls.sh` to print it. Restart the TV app after a network
+change so it picks up the updated addon.
+
+### Torrent server
+
+Stremio's own streaming server runs its torrent engine (a fork of `torrent-stream`) in JavaScript on
+a single thread. On big, high-bitrate torrents that thread can hit 100% CPU, and once it does it stops
+feeding the player — the TV buffers endlessly while the download speed still looks fine.
+
+`torrent_server.py` replaces just that part. It answers the same torrent requests the TV makes, using
+[libtorrent](https://libtorrent.org) — the multi-threaded C++ engine inside qBittorrent — and passes
+every other request (settings, transcoding, subtitles) through to Stremio's server untouched. The TV's
+Server URL points at it (`:12472`); nothing in the Stremio app is modified, so its updates can't break
+this. Torrent results from every addon (Torrentio, MediaFusion, AIOStreams…) go through it.
+
+- Nothing is downloaded until a player asks. Each reader gets a window that starts small, so the first
+  pieces arrive quickly, and grows to ~450 MB ahead as playback settles in.
+- Every piece is verified against the torrent's hashes before it is sent to the TV.
+- Downloaded pieces stay in `~/.stremio-local-addon/torrent-cache/`, so rewinding and re-watching are
+  served from disk. Torrents nobody has used for a while are deleted oldest-first once the cache passes
+  **15 GB**, or whenever the disk drops below 3 GB free.
+- If Stremio desktop is closed, torrents still play (the TV's status checks are answered from the last
+  time it was open); only transcoding and subtitle conversion need it running.
+
+- Downloads are capped at **48 Mbps** by default, so the torrent doesn't crowd the TV stream off a
+  shared Wi-Fi link — that is still well above a 4K WEB-DL's bitrate. On a wired Mac, raise or remove
+  it with `{"download_limit_mbps": 0}`.
+
+Settings live at the top of `torrent_server.py`; override any of them in
+`~/.stremio-local-addon/torrentd.json`, e.g. `{"cache_budget_gb": 30}`, then restart it.
+`https://<host>:12472/torrentd/health` shows active torrents, speeds and cache use.
+
+To go back to Stremio's own server, set the TV's Server URL to `:12470` again.
 
 ### Menu bar icon
 
@@ -149,9 +183,11 @@ Use this to exclude files entirely. If you just want a file listed *without* mat
 ## Managing it
 
 ```bash
-tail -f ~/.stremio-local-addon/addon.log                       # watch it
+tail -f ~/.stremio-local-addon/addon.log                       # watch the library addon
+tail -f ~/.stremio-local-addon/torrent.log                     # watch the torrent server
 ~/.stremio-local-addon/urls.sh                                 # current URLs + health
-launchctl kickstart -k gui/$(id -u)/com.local.stremio-library  # restart
+launchctl kickstart -k gui/$(id -u)/com.local.stremio-library  # restart the addon
+launchctl kickstart -k gui/$(id -u)/com.local.stremio-torrent  # restart the torrent server
 ./uninstall.sh                                                 # remove
 ```
 

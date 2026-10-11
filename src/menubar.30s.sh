@@ -1,6 +1,6 @@
 #!/bin/bash
-# SwiftBar plugin — menu bar status for the Stremio Local Library addon.
-# Shows whether both servers are up, and copies the URLs for the current network on click.
+# SwiftBar plugin — menu bar status for the Stremio Local Library addon and the torrent server.
+# Shows whether the servers are up, and copies the URLs for the current network on click.
 #
 # <xbar.title>Stremio Local Library</xbar.title>
 # <xbar.desc>Status and URLs for the Stremio Local Library addon.</xbar.desc>
@@ -12,7 +12,9 @@
 # path — no node, and no Homebrew coreutils shadowing the BSD ones.
 INSTALL_DIR="$HOME/.stremio-local-addon"
 LABEL="com.local.stremio-library"
+TLABEL="com.local.stremio-torrent"
 LOG="$INSTALL_DIR/addon.log"
+TLOG="$INSTALL_DIR/torrent.log"
 CERT="$HOME/Library/Application Support/stremio-server/httpsCert.json"
 SELF="${SWIFTBAR_PLUGIN_PATH:-$0}"
 
@@ -31,7 +33,9 @@ footer() {
   echo "---"
   echo "Open Stremio | bash=/usr/bin/open param1=-a param2=Stremio terminal=false refresh=true sfimage=play.rectangle"
   echo "Restart addon | bash=/bin/launchctl param1=kickstart param2=-k param3=gui/$(/usr/bin/id -u)/$LABEL terminal=false refresh=true sfimage=arrow.clockwise"
+  echo "Restart torrent server | bash=/bin/launchctl param1=kickstart param2=-k param3=gui/$(/usr/bin/id -u)/$TLABEL terminal=false refresh=true sfimage=arrow.clockwise"
   echo "Open log | bash=/usr/bin/open param1=-a param2=Console param3=\"$LOG\" terminal=false sfimage=doc.text"
+  echo "Open torrent log | bash=/usr/bin/open param1=-a param2=Console param3=\"$TLOG\" terminal=false sfimage=doc.text"
   echo "Open Media folder | bash=/usr/bin/open param1=\"$HOME/Media\" terminal=false sfimage=folder"
 }
 
@@ -45,7 +49,7 @@ if [ -z "$IP" ] || [ -z "$DOMAIN" ]; then
 fi
 
 HOST="$(echo "$IP" | /usr/bin/tr . -).$HASH"
-TV_URL="https://$HOST:12470/"
+TV_URL="https://$HOST:12472/"
 ADDON_URL="https://$HOST:12471/manifest.json"
 
 # Probe the LAN address the TV would use, under the real hostname so TLS is checked too.
@@ -55,8 +59,9 @@ probe() { # port path
 }
 [ "$(probe 12471 /manifest.json)" = "200" ] && ADDON_UP=1 || ADDON_UP=0
 [ "$(probe 12470 /settings)" = "200" ] && SERVER_UP=1 || SERVER_UP=0
+[ "$(probe 12472 /torrentd/health)" = "200" ] && TORRENT_UP=1 || TORRENT_UP=0
 
-if [ $ADDON_UP = 0 ]; then COLOR=red
+if [ $ADDON_UP = 0 ] || [ $TORRENT_UP = 0 ]; then COLOR=red
 elif [ $SERVER_UP = 0 ]; then COLOR=yellow
 else COLOR=green; fi
 echo "| sfimage=play.tv.fill sfcolor=$COLOR"
@@ -69,10 +74,15 @@ elif /usr/sbin/lsof -nP -iTCP:12471 -sTCP:LISTEN >/dev/null 2>&1; then
 else
   echo "Local Library :12471 — not running | sfimage=xmark.circle.fill sfcolor=red refresh=true"
 fi
-if [ $SERVER_UP = 1 ]; then
-  echo "Streaming server :12470 — running | sfimage=checkmark.circle.fill sfcolor=green refresh=true"
+if [ $TORRENT_UP = 1 ]; then
+  echo "Torrent server :12472 — running | sfimage=checkmark.circle.fill sfcolor=green refresh=true"
 else
-  echo "Streaming server :12470 — Stremio desktop is closed | sfimage=moon.circle.fill sfcolor=yellow refresh=true"
+  echo "Torrent server :12472 — not running | sfimage=xmark.circle.fill sfcolor=red refresh=true"
+fi
+if [ $SERVER_UP = 1 ]; then
+  echo "Stremio server :12470 — running | sfimage=checkmark.circle.fill sfcolor=green refresh=true"
+else
+  echo "Stremio server :12470 — closed (torrents still play; no transcoding) | sfimage=moon.circle.fill sfcolor=yellow refresh=true"
 fi
 echo "LAN IP $IP | sfimage=wifi refresh=true"
 

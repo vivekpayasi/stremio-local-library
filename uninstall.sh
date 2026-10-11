@@ -7,6 +7,8 @@ set -euo pipefail
 INSTALL_DIR="$HOME/.stremio-local-addon"
 LABEL="com.local.stremio-library"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
+TLABEL="com.local.stremio-torrent"
+TPLIST="$HOME/Library/LaunchAgents/$TLABEL.plist"
 
 bold() { printf '\033[1m%s\033[0m\n' "$*"; }
 ok()   { printf '  \033[32m✓\033[0m %s\n' "$*"; }
@@ -52,6 +54,11 @@ ok "Service stopped"
 rm -f "$PLIST"
 ok "Launch agent removed"
 
+launchctl bootout "gui/$(id -u)/$TLABEL" 2>/dev/null || true
+launchctl unload -w "$TPLIST" 2>/dev/null || true
+rm -f "$TPLIST"
+ok "Torrent server stopped and removed — set the TV's Server URL back to port 12470"
+
 # The menu bar plugin may live in SwiftBar's own plugin folder, outside $INSTALL_DIR.
 PLUGIN_DIR="$(defaults read com.ameba.SwiftBar PluginDirectory 2>/dev/null || true)"
 if [ -n "$PLUGIN_DIR" ] && [ -f "$PLUGIN_DIR/stremio-library.30s.sh" ]; then
@@ -60,7 +67,8 @@ if [ -n "$PLUGIN_DIR" ] && [ -f "$PLUGIN_DIR/stremio-library.30s.sh" ]; then
 fi
 
 if [ -d "$INSTALL_DIR" ]; then
-  read -r -p "Delete $INSTALL_DIR (logs, caches, backups)? [y/N] " reply
+  CACHE_SIZE="$(du -sh "$INSTALL_DIR/torrent-cache" 2>/dev/null | cut -f1 || true)"
+  read -r -p "Delete $INSTALL_DIR (logs, backups, torrent cache ${CACHE_SIZE:-empty})? [y/N] " reply
   case "$reply" in
     [yY]*) rm -rf "$INSTALL_DIR"; ok "Removed $INSTALL_DIR" ;;
     *) warn "Kept $INSTALL_DIR" ;;
