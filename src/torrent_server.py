@@ -11,6 +11,7 @@ Nothing is downloaded until a player asks for it: each reader gets hard deadline
 ahead of it and a read-ahead window beyond that. Downloaded pieces stay on disk, so rewinds are served
 from disk; inactive torrents are deleted oldest-first once the cache exceeds its budget.
 """
+import bisect
 import http.client
 import json
 import mimetypes
@@ -21,6 +22,7 @@ import signal
 import socket
 import socketserver
 import ssl
+import struct
 import subprocess
 import sys
 import threading
@@ -57,6 +59,10 @@ CONFIG = {
     # 48 is still well above a 4K WEB-DL's bitrate. 0 = unlimited.
     'download_limit_mbps': 48,
     'max_connections': 300,
+    # Hide MP4 subtitle tracks whose samples are stored far from the video they belong to (e.g. all at
+    # the end of the file). ExoPlayer reads every track's samples, selected or not, so such a track
+    # makes it jump across the file for every subtitle line and re-read the video — endless buffering.
+    'hide_misplaced_mp4_subtitles': True,
 }
 CONFIG_FILE = Path(os.environ.get('TORRENTD_CONFIG', INSTALL_DIR / 'torrentd.json'))   # optional overrides, same keys
 if CONFIG_FILE.exists():
@@ -79,7 +85,8 @@ DEFAULT_TRACKERS = [
 PIECE_CACHE_BYTES = 96 * 1024 * 1024    # recently served pieces, per torrent
 
 IH = r'[0-9a-fA-F]{40}'
-MEDIA_EXT = re.compile(r'\.(mkv|avi|mp4|wmv|vp8|mov|mpg|ts|m3u8|webm|flac|mp3|wav|wma|aac|ogg)$', re.I)
+# Stremio's own list, plus the Blu-ray/AVCHD and iTunes containers (.m2ts, .mts, .m4v) its loose regex happens to match.
+MEDIA_EXT = re.compile(r'\.(mkv|avi|mp4|m4v|wmv|vp8|mov|mpg|ts|m2ts|mts|m3u8|webm|flac|mp3|wav|wma|aac|ogg)$', re.I)
 # Third path segments that belong to Stremio's own HLS/transcoding routes, not to a torrent stream.
 UPSTREAM_SUFFIX = re.compile(r'^(?:(?:hls|master|stream|stream-[^/]*|stream-q-[^/]*|subs-[^/]*|mp4stream-q-[^/]*)\.m3u8'
                              r'|thumb\.jpg|dlna)$')
@@ -188,6 +195,129 @@ def parse_sources(sources):
     return out
 
 
+# ------------------------------------------------------------------------------------------- mp4
+
+MP4_EXT = re.compile(r'\.(mp4|m4v|mov)$', re.I)
+TEXT_HANDLERS = (b'text', b'sbtl', b'subt', b'clcp')
+MISPLACED_BYTES = 64 * MB
+
+
+def mp4_boxes(b, pos, end):
+    """(type, start, header length, end) for each box in b[pos:end]."""
+    while pos + 8 <= end:
+        size, typ = struct.unpack_from('>I4s', b, pos)
+        hdr = 8
+        if size == 1:
+            if pos + 16 > end:
+                return
+            size, hdr = struct.unpack_from('>Q', b, pos + 8)[0], 16
+        elif size == 0:
+            size = end - pos
+        if size < hdr or pos + size > end:
+            return
+        yield typ, pos, hdr, pos + size
+        pos += size
+
+
+def mp4_child(b, start, end, path):
+    for typ, s, h, e in mp4_boxes(b, start, end):
+        if typ == path[0]:
+            return (s, h, e) if len(path) == 1 else mp4_child(b, s + h, e, path[1:])
+    return None
+
+
+def mp4_track(b, s, h, e):
+    """Handler type and [(chunk start time in s, file offset)] of one 'trak' box."""
+    mdia = mp4_child(b, s + h, e, [b'mdia'])
+    if not mdia:
+        return None
+    ms, mh, me = mdia
+    hdlr, mdhd = mp4_child(b, ms + mh, me, [b'hdlr']), mp4_child(b, ms + mh, me, [b'mdhd'])
+    stbl = mp4_child(b, ms + mh, me, [b'minf', b'stbl'])
+    if not (hdlr and mdhd and stbl):
+        return None
+    handler = b[hdlr[0] + hdlr[1] + 8: hdlr[0] + hdlr[1] + 12]
+    p = mdhd[0] + mdhd[1]
+    timescale = struct.unpack_from('>I', b, p + 4 + (16 if b[p] == 1 else 8))[0] or 1
+    bs, bh, be = stbl
+
+    def table(name):
+        box = mp4_child(b, bs + bh, be, [name])
+        if not box:
+            return None
+        q = box[0] + box[1]
+        return q + 8, struct.unpack_from('>I', b, q + 4)[0]
+
+    stts, stsc = table(b'stts'), table(b'stsc')
+    co, wide = table(b'stco'), False
+    if co is None:
+        co, wide = table(b'co64'), True
+    if not (stts and stsc and co):
+        return None
+    offsets = [struct.unpack_from('>Q' if wide else '>I', b, co[0] + i * (8 if wide else 4))[0] for i in range(co[1])]
+    runs = [struct.unpack_from('>III', b, stsc[0] + i * 12)[:2] for i in range(stsc[1])]
+    deltas = [struct.unpack_from('>II', b, stts[0] + i * 8) for i in range(stts[1])]
+    chunks, t, di, left = [], 0, 0, deltas[0][0] if deltas else 0
+    for ci in range(len(offsets)):
+        while len(runs) > 1 and runs[1][0] <= ci + 1:
+            runs.pop(0)
+        chunks.append((t / timescale, offsets[ci]))
+        n = runs[0][1] if runs else 1
+        while n > 0 and di < len(deltas):
+            take = min(n, left)
+            t += take * deltas[di][1]
+            n -= take
+            left -= take
+            if left == 0:
+                di += 1
+                left = deltas[di][0] if di < len(deltas) else 0
+    return {'handler': handler, 'box_start': s, 'chunks': chunks}
+
+
+def find_misplaced_mp4_subtitles(read, size):
+    """[(file offset of a 'trak' type field, description)] for subtitle tracks stored away from their
+    video. read(offset, length) -> bytes or None."""
+    pos = 0
+    while pos + 8 <= size:
+        hdr = read(pos, min(16, size - pos))
+        if not hdr or len(hdr) < 8:
+            return []
+        box, typ = struct.unpack_from('>I4s', hdr, 0)
+        hlen = 8
+        if box == 1:
+            box, hlen = struct.unpack_from('>Q', hdr, 8)[0], 16
+        elif box == 0:
+            box = size - pos
+        if box < hlen:
+            return []
+        if typ == b'moov':
+            if box > 256 * MB:
+                return []
+            moov = read(pos, box)
+            if not moov:
+                return []
+            tracks = [mp4_track(moov, s, h, e) for t2, s, h, e in mp4_boxes(moov, hlen, len(moov)) if t2 == b'trak']
+            tracks = [t for t in tracks if t]
+            videos = [t for t in tracks if t['handler'] == b'vide' and t['chunks']]
+            if not videos:
+                return []
+            video = max(videos, key=lambda t: len(t['chunks']))
+            vt, vo = [c[0] for c in video['chunks']], [c[1] for c in video['chunks']]
+            found = []
+            for n, t in enumerate(tracks):
+                if t['handler'] not in TEXT_HANDLERS or not t['chunks']:
+                    continue
+                far = sum(1 for tm, off in t['chunks']
+                          if abs(off - vo[max(0, bisect.bisect_right(vt, tm) - 1)]) > MISPLACED_BYTES)
+                if far > max(3, len(t['chunks']) // 10):
+                    found.append((pos + t['box_start'] + 4,
+                                  f'track {n + 1} ({t["handler"].decode(errors="replace")}, {far}/{len(t["chunks"])} '
+                                  f'chunks stored >64 MB from their video)'))
+            return found
+        pos += box
+    return []
+
+
 # ----------------------------------------------------------------------------------------- engine
 
 class Torrent:
@@ -205,6 +335,8 @@ class Torrent:
         self.last_announce = 0.0
         self.dropping = False
         self.error = None         # set by file/torrent error alerts; readers fail fast while it is
+        self.mp4_patches = {}     # file index -> [(file offset, 4 replacement bytes)]
+        self.mp4_lock = threading.Lock()
         self.lock = threading.RLock()
         self.touch()
         if handle.status().has_metadata:
@@ -254,6 +386,42 @@ class Torrent:
             while self.handle.get_file_priorities()[idx] == 0 and time.time() < end:
                 time.sleep(0.02)
             self.handle.prioritize_pieces([self.prio.get(p, 0) for p in range(self.ti.num_pieces())])
+
+    def read_bytes(self, idx, start, length, timeout=60):
+        """File bytes [start, start+length), downloading what is missing; None on timeout."""
+        fs, plen = layout(self.ti), self.ti.piece_length()
+        foff, end = fs.file_offset(idx), start + length - 1
+        first, last = (foff + start) // plen, (foff + end) // plen
+        rid, out = object(), bytearray()
+        self.ensure_file_wanted(idx)
+        try:
+            for p in range(first, last + 1):
+                self.want(rid, p, last)
+                if not self.wait_piece(p, timeout):
+                    return None
+                data = self.piece_data(p)
+                if data is None:
+                    return None
+                out += data[max(0, foff + start - p * plen): min(len(data), foff + end + 1 - p * plen)]
+        finally:
+            self.release(rid)
+        return bytes(out)
+
+    def patches_for(self, idx, name, size):
+        """Byte patches to apply when serving this file (computed once per file)."""
+        if not CONFIG['hide_misplaced_mp4_subtitles'] or not MP4_EXT.search(name):
+            return []
+        with self.mp4_lock:
+            if idx not in self.mp4_patches:
+                patches = []
+                try:
+                    for off, why in find_misplaced_mp4_subtitles(lambda o, n: self.read_bytes(idx, o, n), size):
+                        patches.append((off, b'free'))
+                        log(f'mp4 {self.ih[:8]}/{idx}: hiding {why} — ExoPlayer would otherwise keep jumping to it')
+                except Exception as e:
+                    log(f'mp4 {self.ih[:8]}/{idx}: could not inspect ({type(e).__name__}: {e}); serving unchanged')
+                self.mp4_patches[idx] = patches
+            return self.mp4_patches[idx]
 
     def want(self, rid, piece, last_piece):
         """A reader is now at `piece` and will read no further than `last_piece`."""
@@ -942,7 +1110,7 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         if self.command == 'HEAD':
             return
-        ok = self.send_range(t, idx, start, end)
+        ok = self.send_range(t, idx, start, end, t.patches_for(idx, f['name'], size))
         took = time.time() - self.t0
         tm = getattr(self, 'timing', {})
         log(f'{self.command} {ih[:8]}/{idx} {rng or "full"} -> {human(self.sent)} in {took:.1f}s'
@@ -951,7 +1119,7 @@ class Handler(BaseHTTPRequestHandler):
         if not ok:
             self.close_connection = True
 
-    def send_range(self, t, idx, start, end):
+    def send_range(self, t, idx, start, end, patches=()):
         """Write file bytes [start, end] as their pieces arrive. False if the reader stopped early."""
         fs = layout(t.ti)
         plen = t.ti.piece_length()
@@ -981,6 +1149,12 @@ class Handler(BaseHTTPRequestHandler):
                 a = foff + pos - piece * plen                  # where we are inside the piece
                 b = min(len(data), foff + end + 1 - piece * plen)
                 view = memoryview(data)[a:b]
+                for off, rb in patches:        # e.g. a misplaced subtitle 'trak' relabelled 'free'
+                    if off < pos + len(view) and off + len(rb) > pos:
+                        view = memoryview(bytearray(view))
+                        for i, ch in enumerate(rb):
+                            if pos <= off + i < pos + len(view):
+                                view[off + i - pos] = ch
                 for i in range(0, len(view), CHUNK):
                     self.wfile.write(view[i:i + CHUNK])
                 timing['write'] += time.time() - t2

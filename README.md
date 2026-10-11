@@ -99,6 +99,12 @@ this. Torrent results from every addon (Torrentio, MediaFusion, AIOStreams…) g
 - If Stremio desktop is closed, torrents still play (the TV's status checks are answered from the last
   time it was open); only transcoding and subtitle conversion need it running.
 
+- MP4s whose subtitle tracks are stored far from their video (some releases put them all at the end of
+  the file) get those tracks hidden: ExoPlayer reads every track, selected or not, and would otherwise
+  jump across the file for each subtitle line and buffer endlessly. Only the 4-byte label of each such
+  track in the file's index is changed, so video, audio, Dolby Vision and seeking are untouched; the
+  built-in subtitles of that file are lost (use a subtitles addon instead). `torrent.log` names every
+  track it hides. Turn it off with `{"hide_misplaced_mp4_subtitles": false}`.
 - Downloads are capped at **48 Mbps** by default, so the torrent doesn't crowd the TV stream off a
   shared Wi-Fi link — that is still well above a 4K WEB-DL's bitrate. On a wired Mac, raise or remove
   it with `{"download_limit_mbps": 0}`.
