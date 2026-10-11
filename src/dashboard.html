@@ -187,7 +187,7 @@ function strip(s) {
   }
   rects += `<rect x="${Math.max(0, x0 - 1.5).toFixed(1)}" y="0" width="3" height="${H}" fill="var(--ink)"/>`;
   const at = s.position_s != null ? clock(s.position_s) : `${Math.round(s.position * 100)}%`;
-  const label = `Downloaded parts of the file; playing at ${at}${s.ahead_s != null ? `, ${clock(s.ahead_s)} buffered ahead` : ''}`;
+  const label = `Downloaded parts of the file; the TV has read up to ${at}${s.ahead_s != null ? `, ${clock(s.ahead_s)} buffered ahead` : ''}`;
   const left = Math.min(96, Math.max(4, s.position * 100));
   return `<figure class="strip">
     <span class="head-label" style="left:${left}%">${esc(at)}</span>
@@ -196,7 +196,7 @@ function strip(s) {
     <figcaption class="legend">
       <span><i style="background:var(--have)"></i>Downloaded</span>
       <span><i style="background:var(--ahead)"></i>Buffered ahead</span>
-      <span><i class="line"></i>Playing</span>
+      <span><i class="line"></i>Read by the TV</span>
     </figcaption></figure>`;
 }
 
@@ -269,7 +269,7 @@ function nowPlaying(state) {
     ${strip(s)}
     <div class="figures">
       <div class="fig hero"><div class="label">Buffered ahead</div><div class="value">${esc(ahead)}</div>
-        <div class="note">${s.ahead_s != null ? bytes(s.ahead_bytes) + ' ready on this Mac' : 'Bitrate not known yet'}</div></div>
+        <div class="note">${s.complete ? 'The rest of the file is on this Mac' : s.ahead_s != null ? `${bytes(s.ahead_bytes)} ready on this Mac` : 'Bitrate not known yet'}</div></div>
       <div class="fig"><div class="label">Download</div><div class="value">${nf.format(s.download_mbps)} Mbps</div>
         <div class="note">${need ? `${need < s.download_mbps ? lv('good', '') : lv('warn', '')}file needs ${nf.format(need)}` : 'file bitrate not known yet'}</div></div>
       <div class="fig"><div class="label">Peers</div><div class="value">${s.peers.connected}</div>
@@ -378,10 +378,11 @@ function render(state) {
 
 async function poll() {
   clearTimeout(timer);
+  let state = null;
   try {
     const r = await fetch('/ui/api/state', { cache: 'no-store' });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    render(await r.json());
+    state = await r.json();
     lastOk = Date.now();
     $('fresh').textContent = '';
   } catch (e) {
@@ -389,6 +390,12 @@ async function poll() {
     $('mark').textContent = MARK.bad;
     $('health').textContent = 'Can\'t reach the torrent server';
     $('fresh').textContent = lastOk ? `last update ${ago((Date.now() - lastOk) / 1000)}` : '';
+  }
+  if (state) {
+    try { render(state); } catch (e) {
+      console.error(e);
+      $('fresh').textContent = 'Part of this page failed to update — reload it';
+    }
   }
   if (!document.hidden) timer = setTimeout(poll, 2000);
 }

@@ -66,7 +66,7 @@ def parse_mac_wifi(out):
 TV_COMMAND = ('getprop ro.product.model; getprop ro.build.version.release; echo ===; '
               'dumpsys wifi | grep -m1 mWifiInfo; echo ===; grep -E "^Mem(Total|Available)" /proc/meminfo; echo ===; '
               'top -b -n 1 -o PID,%CPU,RES,ARGS | grep com.stremio | grep -v grep; echo ===; '
-              'logcat -d -v time -t 4000 | grep -E "I/ExoPlayerImpl|E/ExoPlayerImplInternal|ExoPlaybackException|'
+              'logcat -d -v time -t 1500 | grep -E "I/ExoPlayerImpl|E/ExoPlayerImplInternal|ExoPlaybackException|'
               'D/MediaCodec.*create \\+|V/mpv|lowmemorykiller.*Kill|aml_audio_dts_dec" | tail -60')
 
 AUDIO_CODEC_NAME = re.compile(r'\.audio\.|aac|mp3|opus|vorbis|flac|raw|amr|g711|alac|ape', re.I)
@@ -141,11 +141,42 @@ def filter_log(text, limit=40):
         if not line.strip() or NOISE.search(line):
             continue
         m = re.match(r'\d{4}-\d\d-\d\dT(\d\d:\d\d:\d\d)\.\d+Z (.*)', line)
-        out.append({'time': m.group(1), 'text': m.group(2)} if m else {'time': '', 'text': line.rstrip()})
+        time_, text = (m.group(1), m.group(2)) if m else ('', line.rstrip())
+        # Query strings can carry another addon's URL, debrid token and all: the page may be open on any device.
+        out.append({'time': time_, 'text': re.sub(r'\?\S+', '?…', text)})
     return out[-limit:]
 
 
 # ------------------------------------------------------------------------------------------ sessions
+
+def ui_allowed(client, host, fetch_site, lan, own, cert_suffix):
+    """Whether a request may read the dashboard. Only names of this Mac are accepted as Host (a site that
+    points its own name at 127.0.0.1 — DNS rebinding — gets nothing), browsers' cross-site fetches are refused
+    (any web page could otherwise read localhost), and other devices need the LAN switch."""
+    if fetch_site == 'cross-site':
+        return False
+    name = (host or '').rsplit(':', 1)[0].strip('[]').lower()
+    if not (name in ('localhost', '127.0.0.1', '::1') or name in own or (cert_suffix and name.endswith(cert_suffix))):
+        return False
+    return client.startswith('127.') or bool(lan)
+
+
+EPISODE = re.compile(r'(?:\bS(\d{1,2})[ ._-]?E(\d{1,3})|\b(\d{1,2})x(\d{2,3}))', re.I)
+
+
+def title_for(titles, ih, idx, file_name):
+    """What the advisor recorded for this file. Season packs share one hash across episodes, so a match on
+    the hash alone takes the episode from the file name rather than from whichever episode was browsed last."""
+    exact = titles.get(f'{ih}:{idx}')
+    if exact:
+        return exact
+    t = titles.get(ih)
+    if not t or t.get('type') != 'series':
+        return t
+    m = EPISODE.search(file_name or '')
+    season, episode = (m.group(1) or m.group(3), m.group(2) or m.group(4)) if m else (None, None)
+    return dict(t, season=int(season) if season else None, episode=int(episode) if episode else None)
+
 
 def account_status(line):
     """The last self-heal line from addon.log, in plain words."""
@@ -191,10 +222,12 @@ def clock(s):
     return f'{s // 3600}:{s // 60 % 60:02d}:{s % 60:02d}' if s >= 3600 else f'{s // 60}:{s % 60:02d}'
 
 
-def classify_requests(reqs, size, duration_s=None, now=None):
+def classify_requests(reqs, size, duration_s=None, now=None, stalls=()):
     """What the player's requests say happened, newest first: seeks, stalls waiting for pieces (the swarm), and
     the player re-reading one spot over and over (the player, or a file laid out badly for it). Short reads near
-    the end of the file are the player reading the index, not seeks. Time spent sending says nothing: the TV
+    the end of a large file are the player reading the index, not seeks. Stalls are recorded by the server the
+    moment a piece took long to arrive (`stalls`); a request's total wait would only say so once the request
+    ends, which for a player streaming a whole film is the end of the film. Time spent sending says nothing: the TV
     reads only as fast as it plays, so a healthy request spends most of its life waiting to send. The network
     is judged by the ping to the TV instead (see health)."""
     events, prev_end, recent_starts, last_reread = [], None, [], None
@@ -207,19 +240,29 @@ def classify_requests(reqs, size, duration_s=None, now=None):
                        'pos': round(r['start'] / size, 4) if size else None, 'recent': bool(now and now - r['at'] < 30)})
 
     for r in reqs:
-        if size and r['start'] > size - 64 * MB and r['sent'] < 4 * MB:
+        if size > 256 * MB and r['start'] > size - 64 * MB and r['sent'] < 4 * MB:
             continue
         if prev_end is not None and abs(r['start'] - prev_end) > 32 * MB:
             add(r, 'seek', f'Jumped to {where(r["start"])}', None)
-        if r.get('wait', 0) >= 3:
-            add(r, 'stall', f'Waited {r["wait"]:.1f} s for pieces at {where(r["start"])}', 'swarm')
         recent_starts = [(t, s) for t, s in recent_starts if r['at'] - t <= 30] + [(r['at'], r['start'])]
         close = [s for _, s in recent_starts if abs(s - r['start']) <= MB]
         if len(close) >= 3 and (last_reread is None or abs(last_reread - r['start']) > MB):
             add(r, 'reread', f'The player re-read {where(r["start"])} {len(close)} times', 'player')
             last_reread = r['start']
         prev_end = r['start'] + r['sent']
-    return events[::-1]
+    # A wait in the middle of data that was flowing is a stall. Waiting for the first pieces of the stream, or
+    # of the spot just jumped to, is ordinary start-up and buffering — slow, perhaps, but not a failing torrent.
+    first_at = min((r['at'] for r in reqs), default=None)
+    for st in stalls:
+        at, w, place = {'at': st['at'], 'start': st['pos']}, st['wait'], where(st['pos'])
+        if st.get('mid', True):
+            add(at, 'stall', f'Stalled for {w:.1f} s at {place}', 'swarm')
+        elif first_at is not None and st['at'] - first_at < 30:
+            add(at, 'startup', f'Took {w:.1f} s to get the first pieces', None)
+        else:
+            add(at, 'buffering', f'Buffered for {w:.1f} s after jumping to {place}', 'swarm')
+    events.sort(key=lambda e: e['at'], reverse=True)
+    return events
 
 
 def _chips(facts, file_name):
@@ -263,10 +306,13 @@ def summarize_session(snap, facts, title, now):
         run += 1
     end = min((piece + run) * plen, snap['file_offset'] + size)
     ahead = max(0, end - (snap['file_offset'] + pos)) if run else 0
+    complete = pos + ahead >= size      # everything from the TV's read position to the end is on this Mac
+    # Once the end has been sent, the TV plays the rest from its own buffer without asking for more.
+    live = snap['live'] or (complete and now - snap['pos_at'] < 120)
 
     bitrate = (facts or {}).get('bitrateMbps')
     duration = (facts or {}).get('durationS')
-    events = classify_requests(snap.get('requests') or [], size, duration, now)
+    events = classify_requests(snap.get('requests') or [], size, duration, now, snap.get('stalls') or ())
     t = title or {}
     if t.get('season') is not None and t.get('episode') is not None:
         subtitle = f'Season {t["season"]}, episode {t["episode"]}'
@@ -277,7 +323,10 @@ def summarize_session(snap, facts, title, now):
         f'Hiding {hidden} subtitle tracks stored away from the video, so the player doesn\'t jump around the file'
         if hidden else 'Subtitles are stored with the video — no fix needed')
     return {
-        'ih': snap['ih'], 'idx': snap['idx'], 'live': snap['live'],
+        'ih': snap['ih'], 'idx': snap['idx'], 'live': live, 'complete': complete, 'pos_at': snap['pos_at'],
+        'waiting_s': snap.get('waiting_s') or 0, 'waiting_mid': bool(snap.get('waiting_mid')),
+        'starting': (lambda first: first is not None and now - first < 30)(
+            min((r['at'] for r in snap.get('requests') or []), default=None)),
         'title': t.get('name') or snap['torrent'], 'subtitle': subtitle, 'poster': t.get('poster'),
         'file': snap['file'], 'size': size,
         'position': pos / size if size else 0, 'position_s': pos / size * duration if size and duration else None,
@@ -286,7 +335,7 @@ def summarize_session(snap, facts, title, now):
         'bitrate_mbps': bitrate, 'download_mbps': round(snap['download_bps'] * 8 / 1e6, 1),
         'peers': snap['peers'], 'strip': piece_strip(have), 'chips': _chips(facts, snap['file']),
         'verified': bool(facts), 'mp4_fix': mp4_fix, 'events': events[:12],
-        'ended_ago_s': None if snap['live'] else round(now - snap['pos_at']),
+        'ended_ago_s': None if live else round(now - snap['pos_at']),
     }
 
 
@@ -297,10 +346,22 @@ def health(s, tv_ping=None):
     if not s.get('live'):
         return {'level': 'idle', 'text': 'Nothing is playing now'}
     recent = [e for e in s.get('events') or [] if e.get('recent')]
+    waiting = s.get('waiting_s') or 0
+    if waiting >= 3:
+        if s.get('waiting_mid'):
+            return {'level': 'bad', 'text': f'Stalled, waiting for pieces ({waiting:.0f} s) — the torrent can\'t keep up'}
+        if s.get('starting'):
+            return {'level': 'idle', 'text': f'Starting, getting the first pieces ({waiting:.0f} s)'}
+        return {'level': 'warn', 'text': f'Buffering after a jump ({waiting:.0f} s)'}
     if any(e['kind'] == 'stall' for e in recent):
-        return {'level': 'bad', 'text': 'Waiting for pieces — the torrent can\'t keep up'}
-    if tv_ping and (tv_ping.get('ms') is None or tv_ping['ms'] >= 50):
+        return {'level': 'bad', 'text': 'The stream stalled waiting for pieces — the torrent can\'t keep up'}
+    if any(e['kind'] == 'buffering' for e in recent):
+        return {'level': 'warn', 'text': 'Buffering after a jump'}
+    # A ping that gets no answer proves nothing (some TVs ignore ping); a slow answer does.
+    if tv_ping and tv_ping.get('ms') is not None and tv_ping['ms'] >= 50:
         return {'level': 'warn', 'text': 'The TV\'s Wi-Fi is slow to answer — playback may stutter'}
+    if s.get('complete'):
+        return {'level': 'good', 'text': 'Playing, the rest of the file is on this Mac'}
     if any(e['kind'] == 'reread' for e in recent):
         return {'level': 'warn', 'text': 'The player keeps re-reading one spot'}
     ahead, down, need = s.get('ahead_s'), s.get('download_mbps'), s.get('bitrate_mbps')
@@ -365,6 +426,8 @@ class Dashboard:
         self.seen = {}         # ih:idx -> (last summary, when) — what was played, after its torrent left the session
         self.titles = {'mtime': None, 'data': {}}
         self.adb = shutil.which('adb', path=os.environ.get('PATH', '') + ':/opt/homebrew/bin:/usr/local/bin')
+        self.adb_retry_at = 0.0  # a TV that hasn't allowed debugging isn't asked again for a while
+        self.lock = threading.Lock()
         threading.Thread(target=self._collect, name='dashboard', daemon=True).start()
 
     # ---- slow collectors
@@ -378,7 +441,7 @@ class Dashboard:
             now = time.time()
             for name, every, fn in (('process', 5, self._process), ('cache', 20, self._cache),
                                     ('tv_ping', 5, self._ping), ('mac_wifi', 60, self._mac_wifi),
-                                    ('tv', 15, self._tv), ('library', 30, self._library)):
+                                    ('tv', 30, self._tv), ('library', 30, self._library)):
                 if now >= due.get(name, 0):
                     due[name] = now + every
                     try:
@@ -422,6 +485,10 @@ class Dashboard:
         serial = f'{ip}:5555'
         devices = _run([self.adb, 'devices'])
         if not re.search(rf'^{re.escape(serial)}\s+device$', devices, re.M):
+            if time.time() < self.adb_retry_at:
+                return
+            # Each connect can put "Allow debugging?" on screen, over whatever is playing: ask rarely.
+            self.adb_retry_at = time.time() + 600
             _run([self.adb, 'connect', serial], 8)
             devices = _run([self.adb, 'devices'])
             if not re.search(rf'^{re.escape(serial)}\s+device$', devices, re.M):
@@ -453,15 +520,22 @@ class Dashboard:
     # ---- the document
 
     def state(self):
+        with self.lock:          # the Mac and a phone can poll at the same moment
+            return self._state()
+
+    def _state(self):
         now = time.time()
+        if now - self.last_poll > self.VIEWED_S:
+            # Opened again after a while: readings from back then would mislead until they refresh.
+            self.slow.update(tv_ping=None, tv=None)
         self.last_poll = now
         titles = self._titles()
         out = []
         for snap in self.sessions():
             key = f'{snap["ih"]}:{snap["idx"]}'
-            s = summarize_session(snap, self.facts(key), titles.get(snap['ih']), now)
+            s = summarize_session(snap, self.facts(key), title_for(titles, snap['ih'], snap['idx'], snap['file']), now)
             h = self.history.setdefault(key, deque(maxlen=150))
-            if snap['live']:
+            if s['live']:
                 h.append((round(now, 1), None if s['ahead_s'] is None else round(s['ahead_s'], 1), s['download_mbps'],
                           round(s['ahead_bytes'] / MB, 1)))
             s['history'] = list(h)
@@ -474,12 +548,19 @@ class Dashboard:
             if key in current:
                 continue
             if now - at > 2 * 3600:
-                del self.seen[key]
+                self.seen.pop(key, None)
                 continue
             gone = dict(s, live=False, ended_ago_s=round(now - at), events=[], history=[])
             gone['health'] = health(gone)
             out.append(gone)
-        out.sort(key=lambda s: (not s['live'], s['ended_ago_s'] or 0))
+        for key in list(self.history):
+            if key not in self.seen:
+                self.history.pop(key, None)
+            else:
+                h = self.history[key]
+                while h and now - h[0][0] > 600:
+                    h.popleft()
+        out.sort(key=lambda s: (not s['live'], -s['pos_at'] if s['live'] else s['ended_ago_s'] or 0))
         lan_ip = (self.slow.get('tv_ping') or {}).get('ip')
         return {
             'now': now,

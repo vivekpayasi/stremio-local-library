@@ -174,8 +174,14 @@ export function createAdvisor({
       season: season ? Number(season) : null, episode: episode ? Number(episode) : null,
       poster: meta?.poster ?? null, at: Date.now(),
     };
-    for (const s of streams) if (s?.infoHash) titles[String(s.infoHash).toLowerCase()] = entry;
-    const keep = Object.entries(titles).sort((a, b) => b[1].at - a[1].at).slice(0, 3000);
+    for (const s of streams) {
+      if (!s?.infoHash) continue;
+      const ih = String(s.infoHash).toLowerCase();
+      titles[ih] = entry;
+      // A season pack's hash comes up for every episode; the file index says which one this stream is.
+      if (Number.isInteger(s.fileIdx)) titles[`${ih}:${s.fileIdx}`] = entry;
+    }
+    const keep = Object.entries(titles).sort((a, b) => b[1].at - a[1].at).slice(0, 6000);
     try {
       fs.writeFileSync(`${files.titles}.tmp`, JSON.stringify(Object.fromEntries(keep)));
       fs.renameSync(`${files.titles}.tmp`, files.titles);

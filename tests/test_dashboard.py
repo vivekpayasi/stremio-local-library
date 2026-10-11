@@ -10,7 +10,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'src'))
 
 from dashboard import (Dashboard, account_status, classify_requests, filter_log, health, last_tv_ip,  # noqa: E402
-                       parse_mac_wifi, parse_ping, parse_tv_snapshot, piece_strip, summarize_session)
+                       parse_mac_wifi, parse_ping, parse_tv_snapshot, piece_strip, summarize_session, title_for,
+                       ui_allowed)
 
 MB = 1024 * 1024
 
@@ -132,13 +133,39 @@ def req(at, start, sent=8 * MB, took=1.0, wait=0.0, write=0.2, ok=False):
 class Requests(unittest.TestCase):
     SIZE, DURATION = 7_220_830_837, 5085.0   # Chernobyl S01E01 (Accid)
 
-    def test_a_jump_is_a_seek_and_a_long_wait_is_a_stall(self):
-        events = classify_requests([req(100, 0), req(110, 3_000_000_000, wait=6.5, took=7.0)], self.SIZE, self.DURATION)
-        kinds = [e['kind'] for e in events]
-        self.assertEqual(kinds, ['stall', 'seek'], 'newest first')
-        self.assertIn('35:13', events[1]['text'])
+    def test_a_jump_is_a_seek(self):
+        events = classify_requests([req(100, 0), req(110, 3_000_000_000)], self.SIZE, self.DURATION, now=115)
+        self.assertEqual([e['kind'] for e in events], ['seek'])
+        self.assertIn('35:13', events[0]['text'])
+        self.assertTrue(events[0]['recent'])
+
+    def test_stalls_come_from_the_moment_a_piece_was_waited_for(self):
+        # A long request's total wait says nothing about when: stalls are recorded as they happen.
+        stalls = [{'at': 300, 'pos': 3_000_000_000, 'wait': 6.5, 'mid': True}]
+        events = classify_requests([req(100, 0, sent=2_000 * MB, took=900, wait=7.2)], self.SIZE, self.DURATION,
+                                   now=310, stalls=stalls)
+        self.assertEqual([e['kind'] for e in events], ['stall'])
         self.assertIn('6.5 s', events[0]['text'])
+        self.assertIn('35:13', events[0]['text'])
         self.assertEqual(events[0]['cause'], 'swarm')
+        self.assertTrue(events[0]['recent'])
+
+    def test_waiting_for_the_first_pieces_is_start_up_not_a_stall(self):
+        events = classify_requests([req(100, 0)], self.SIZE, self.DURATION, now=110,
+                                   stalls=[{'at': 108, 'pos': 0, 'wait': 7.8, 'mid': False}])
+        self.assertEqual([e['kind'] for e in events], ['startup'])
+        self.assertIsNone(events[0]['cause'])
+
+    def test_waiting_after_a_jump_is_buffering(self):
+        events = classify_requests([req(100, 0), req(200, 3_000_000_000)], self.SIZE, self.DURATION, now=210,
+                                   stalls=[{'at': 205, 'pos': 3_000_000_000, 'wait': 4.0, 'mid': False}])
+        self.assertEqual([e['kind'] for e in events], ['buffering', 'seek'])
+        self.assertIn('35:13', events[0]['text'])
+
+    def test_small_files_have_no_index_reads(self):
+        small = 50 * MB
+        events = classify_requests([req(100, 0, sent=MB), req(101, 45 * MB, sent=MB)], small, None)
+        self.assertEqual([e['kind'] for e in events], ['seek'])
 
     def test_index_reads_near_the_end_are_not_seeks(self):
         events = classify_requests([req(100, 0), req(100.1, self.SIZE - 400_000, sent=400_000)], self.SIZE, self.DURATION)
@@ -194,6 +221,34 @@ class Session(unittest.TestCase):
         self.assertEqual(s['ahead_bytes'], 16 * MB)
         self.assertFalse(s['verified'])
 
+    def test_reaching_the_end_of_the_file_is_fully_buffered_not_low(self):
+        end = dict(SNAP, pos_byte=SNAP['size'] - MB, have=[True] * 26, download_bps=0)
+        s = summarize_session(end, FACTS, TITLE, now=1001.0)
+        self.assertTrue(s['complete'])
+        h = health(s)
+        self.assertEqual(h['level'], 'good')
+        self.assertIn('rest of the file', h['text'])
+
+    def test_a_finished_read_at_the_end_stays_live_while_the_tv_plays_its_buffer(self):
+        end = dict(SNAP, pos_byte=SNAP['size'], have=[True] * 26, live=False, pos_at=1000.0)
+        self.assertTrue(summarize_session(end, FACTS, TITLE, now=1060.0)['live'])
+        self.assertFalse(summarize_session(end, FACTS, TITLE, now=1200.0)['live'])
+
+    def test_a_stall_happening_now_is_reported_now(self):
+        s = summarize_session(dict(SNAP, waiting_s=7.5, waiting_mid=True), FACTS, TITLE, now=1001.0)
+        h = health(s)
+        self.assertEqual(h['level'], 'bad')
+        self.assertIn('8 s', h['text'])
+
+    def test_waiting_at_the_start_or_after_a_jump_is_not_a_stall(self):
+        starting = summarize_session(dict(SNAP, waiting_s=5.0, waiting_mid=False, requests=[req(995, 0)]), FACTS, TITLE, now=1001.0)
+        self.assertEqual(health(starting)['level'], 'idle')
+        self.assertIn('Starting', health(starting)['text'])
+        jumped = summarize_session(dict(SNAP, waiting_s=5.0, waiting_mid=False, requests=[req(900, 0), req(998, 40 * MB)]),
+                                   FACTS, TITLE, now=1001.0)
+        self.assertEqual(health(jumped)['level'], 'warn')
+        self.assertIn('Buffering', health(jumped)['text'])
+
     def test_mp4_fix_status(self):
         self.assertIsNone(summarize_session(SNAP, FACTS, None, now=1001.0)['mp4_fix'])
         hidden = summarize_session({**SNAP, 'mp4_hidden': 5}, FACTS, None, now=1001.0)['mp4_fix']
@@ -220,6 +275,8 @@ class Health(unittest.TestCase):
         self.assertIn('Wi-Fi', slow['text'])
         self.assertEqual(health(good, tv_ping={'ms': 4.0, 'loss': 0})['level'], 'good')
         self.assertEqual(health(None, tv_ping={'ms': 140.0, 'loss': 0})['level'], 'idle')
+        self.assertEqual(health(good, tv_ping={'ms': None, 'loss': 100})['level'], 'good',
+                         'a TV that ignores ping is not a slow one')
 
 
 class State(unittest.TestCase):
@@ -254,6 +311,49 @@ class Account(unittest.TestCase):
         self.assertIsNone(account_status(None))
 
 
+class Titles(unittest.TestCase):
+    TITLES = {
+        'aaa:3': {'name': 'Chernobyl', 'type': 'series', 'season': 1, 'episode': 3, 'poster': 'p'},
+        'aaa': {'name': 'Chernobyl', 'type': 'series', 'season': 1, 'episode': 1, 'poster': 'p'},
+        'bbb': {'name': 'Troy', 'type': 'movie', 'season': None, 'episode': None, 'poster': 'q', 'year': '2004'},
+    }
+
+    def test_the_exact_file_wins(self):
+        self.assertEqual(title_for(self.TITLES, 'aaa', 3, 'Chernobyl.S01E03.mkv')['episode'], 3)
+
+    def test_a_pack_found_by_hash_alone_takes_the_episode_from_the_file_name(self):
+        t = title_for(self.TITLES, 'aaa', 4, 'Chernobyl.S01E04.1080p.mkv')
+        self.assertEqual((t['name'], t['season'], t['episode']), ('Chernobyl', 1, 4))
+        t = title_for(self.TITLES, 'aaa', 9, 'Extras - Making of.mkv')
+        self.assertEqual((t['season'], t['episode']), (None, None))
+
+    def test_movies_and_unknown_torrents(self):
+        self.assertEqual(title_for(self.TITLES, 'bbb', 0, 'Troy.mkv')['name'], 'Troy')
+        self.assertIsNone(title_for(self.TITLES, 'ccc', 0, 'x.mkv'))
+
+
+class Access(unittest.TestCase):
+    OWN = {'127.0.0.1', '192.168.0.101'}
+    SUFFIX = '.519b6502d940.stremio.rocks'
+
+    def ok(self, client, host, site=None, lan=False):
+        return ui_allowed(client, host, site, lan=lan, own=self.OWN, cert_suffix=self.SUFFIX)
+
+    def test_this_mac(self):
+        self.assertTrue(self.ok('127.0.0.1', 'localhost:11472'))
+        self.assertTrue(self.ok('127.0.0.1', '127.0.0.1:11472', 'same-origin'))
+
+    def test_other_devices_only_with_lan_on(self):
+        self.assertFalse(self.ok('192.168.0.57', '192.168.0.101:11472'))
+        self.assertTrue(self.ok('192.168.0.57', '192.168.0.101:11472', lan=True))
+        self.assertTrue(self.ok('192.168.0.57', '192-168-0-101.519b6502d940.stremio.rocks:12472', 'none', lan=True))
+
+    def test_other_websites_cannot_read_it(self):
+        self.assertFalse(self.ok('127.0.0.1', 'localhost:11472', 'cross-site'), 'a web page fetching localhost')
+        self.assertFalse(self.ok('127.0.0.1', 'evil.example:11472'), 'DNS rebinding')
+        self.assertFalse(self.ok('192.168.0.57', 'evil.example:12472', lan=True))
+
+
 class TvAddress(unittest.TestCase):
     def test_the_last_device_that_polled_like_a_stremio_client(self):
         text = '\n'.join([
@@ -283,6 +383,11 @@ class Log(unittest.TestCase):
             'Traceback (most recent call last):',
         ])
         self.assertEqual(lines[0]['time'], '18:26:04')
+
+    def test_query_strings_are_hidden(self):
+        lines = filter_log('2026-10-11T18:26:04.642Z 192.168.0.100 GET /opensubHash?videoUrl=https%3A%2F%2Fx%2Frealdebrid%2Fsecret -> 200')
+        self.assertNotIn('secret', lines[0]['text'])
+        self.assertIn('/opensubHash?…', lines[0]['text'])
 
 
 if __name__ == '__main__':

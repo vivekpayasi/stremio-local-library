@@ -36,7 +36,7 @@ from pathlib import Path
 
 import libtorrent as lt
 
-from dashboard import PAGE as DASHBOARD_PAGE, Dashboard, last_tv_ip
+from dashboard import PAGE as DASHBOARD_PAGE, Dashboard, last_tv_ip, ui_allowed
 from stream_facts import FFPROBE, FactStore, Prober, ffprobe_runner
 
 HOME = Path.home()
@@ -133,18 +133,28 @@ def human(n):
     return f'{n / MB:.1f}MB' if n < 1024 * MB else f'{n / 1024 / MB:.2f}GB'
 
 
-_own = {'at': 0.0, 'ips': set()}
+_own = {'at': 0.0, 'ips': {'127.0.0.1', '::1'}}
+_own_lock = threading.Lock()
 
 
 def own_ips():
-    """This Mac's addresses: requests from them are Stremio desktop's server, not the TV."""
-    if time.time() - _own['at'] > 60:
-        ips = {'127.0.0.1', '::1'}
-        for line in subprocess.run(['ifconfig'], capture_output=True, text=True).stdout.splitlines():
-            m = re.match(r'\s+inet6? ([0-9a-f.:]+)', line)
-            if m:
-                ips.add(m.group(1).split('%')[0])
-        _own.update(at=time.time(), ips=ips)
+    """This Mac's addresses: requests from them are Stremio desktop's server, not the TV. Called on request
+    threads, so it never blocks them: one thread refreshes (every minute) while the rest use the last answer."""
+    if time.time() - _own['at'] > 60 and _own_lock.acquire(blocking=False):
+        try:
+            out = subprocess.run(['ifconfig'], capture_output=True, text=True, timeout=2).stdout
+            ips = {'127.0.0.1', '::1'}
+            for line in out.splitlines():
+                m = re.match(r'\s+inet6? ([0-9a-f.:]+)', line)
+                if m:
+                    ips.add(m.group(1).split('%')[0])
+            if len(ips) > 2:
+                _own['ips'] = ips
+        except (OSError, subprocess.SubprocessError):
+            pass
+        finally:
+            _own['at'] = time.time()
+            _own_lock.release()
     return _own['ips']
 
 
@@ -164,7 +174,15 @@ def phone_url():
         domain = json.loads(Path(CONFIG['cert_file']).read_text())['domain']
     except (OSError, ValueError, KeyError):
         return None
-    lan = next((ip for ip in sorted(own_ips()) if re.fullmatch(r'(192\.168|10|172\.(1[6-9]|2\d|3[01]))\.[\d.]+', ip)), None)
+    # The Wi-Fi or Ethernet address, like the installer uses — not a VPN's or a virtual machine bridge's.
+    lan = None
+    for iface in ('en0', 'en1'):
+        try:
+            lan = subprocess.run(['ipconfig', 'getifaddr', iface], capture_output=True, text=True, timeout=2).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            lan = None
+        if lan:
+            break
     if not lan:
         return None
     return f'https://{lan.replace(".", "-")}.{domain.split(".", 1)[1]}:{CONFIG["https_port"]}/ui'
@@ -390,8 +408,10 @@ class Torrent:
         self.mp4_lock = threading.Lock()
         # For the dashboard, the TV's requests only: where it is reading each file, and how its requests went.
         self.positions = {}       # file index -> (byte offset, time)
-        self.open_requests = collections.Counter()   # file index -> requests being served right now
-        self.requests = collections.deque(maxlen=80)
+        self.open_requests = collections.Counter()   # file index -> requests being served right now (under lock)
+        self.requests = collections.deque(maxlen=80) # recorded when they start; 'sent' grows as bytes go out
+        self.stalls = collections.deque(maxlen=40)   # a piece that kept the TV waiting, when it happened
+        self.waiting = {}         # reader -> (file index, since, mid-stream?): pieces being waited for right now
         self.lock = threading.RLock()
         self.touch()
         if handle.status().has_metadata:
@@ -632,6 +652,8 @@ class Torrent:
             peers, sending, seeds = [], 0, 0
         pos, at = self.positions.get(idx, (0, self.last_used))
         patches = self.mp4_patches.get(idx)
+        now = time.time()
+        waits = [(now - since, mid) for i, since, mid in list(self.waiting.values()) if i == idx]
         return {
             'ih': self.ih, 'idx': idx, 'torrent': self.ti.name(), 'file': fs.file_name(idx), 'size': size,
             'piece_len': plen, 'file_offset': offset, 'first_piece': first, 'pos_byte': pos, 'pos_at': at,
@@ -639,7 +661,10 @@ class Torrent:
             'peers': {'connected': len(peers), 'sending': sending, 'seeds': seeds},
             'mp4_hidden': None if patches is None else len(patches),
             'live': self.open_requests[idx] > 0 or time.time() - at < 20,
-            'requests': [r for r in list(self.requests) if r['idx'] == idx],
+            'requests': [dict(r) for r in list(self.requests) if r['idx'] == idx],
+            'stalls': [st for st in list(self.stalls) if st['idx'] == idx],
+            'waiting_s': round(max(w for w, _ in waits), 1) if waits else 0,
+            'waiting_mid': any(mid for _, mid in waits),
         }
 
     def debug(self):
@@ -799,7 +824,9 @@ class Engine:
         for t in list(self.torrents.values()):
             if t.ti is None or t.dropping:
                 continue
-            for idx in list(t.positions):
+            # The files read in the last two hours, at most four per torrent (a season pack can have dozens).
+            recent = sorted(((at, i) for i, (_, at) in list(t.positions.items()) if time.time() - at < 7200), reverse=True)
+            for _, idx in recent[:4]:
                 try:
                     out.append(t.snapshot(idx))
                 except Exception as e:
@@ -984,7 +1011,8 @@ class Handler(BaseHTTPRequestHandler):
     engine = None   # set at startup
     prober = None   # set at startup when ffprobe is available
     dashboard = None
-    tv_ip = None    # the last device that polled us like a Stremio client does
+    tv_ip = None    # the device streaming from us, else the last one that polled us like a Stremio client does
+    tv_streamed_at = 0.0
 
     def log_message(self, fmt, *args):
         pass
@@ -1011,7 +1039,9 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if path in ('/ui', '/ui/', '/ui/api/state'):
                 return self.ui(path)
-            if (path.endswith('/stats.json') or path in REMEMBERED) and self.client_address[0] not in own_ips():
+            # Another device running Stremio (a phone) polls like the TV does; the one streaming wins for 10 min.
+            if ((path.endswith('/stats.json') or path in REMEMBERED) and time.time() - Handler.tv_streamed_at > 600
+                    and self.client_address[0] not in own_ips()):
                 Handler.tv_ip = self.client_address[0]
             if path == '/torrentd/health':
                 return self.json(self.engine.health())
@@ -1120,16 +1150,22 @@ class Handler(BaseHTTPRequestHandler):
     # ---- dashboard
 
     def ui(self, path):
-        local = self.client_address[0].startswith(('127.', '::1'))
-        if not (local or CONFIG['dashboard_lan']):
+        try:
+            domain = json.loads(Path(CONFIG['cert_file']).read_text())['domain']
+            suffix = '.' + domain.split('.', 1)[1]
+        except (OSError, ValueError, KeyError, IndexError):
+            suffix = None
+        if not ui_allowed(self.client_address[0], self.headers.get('Host'), self.headers.get('Sec-Fetch-Site'),
+                          CONFIG['dashboard_lan'], own_ips(), suffix):
             body = ('<!doctype html><meta charset="utf-8"><title>Dashboard</title><p>The dashboard only opens on the Mac '
                     'running the server. To open it from other devices on your network, add <code>"dashboard_lan": true'
                     '</code> to ~/.stremio-local-addon/torrentd.json and restart the torrent server.').encode()
             return self.send_bytes(403, 'text/html; charset=utf-8', body)
         if path == '/ui/api/state':
+            # Not self.json(): that would add a CORS header and let any web page read what is being watched.
             if not self.dashboard:
-                return self.json({'error': 'dashboard not running'}, 503)
-            return self.json(self.dashboard.state())
+                return self.send_bytes(503, 'application/json', b'{"error": "dashboard not running"}')
+            return self.send_bytes(200, 'application/json; charset=utf-8', json.dumps(self.dashboard.state()).encode())
         try:
             page = DASHBOARD_PAGE.read_bytes()
         except OSError:
@@ -1270,27 +1306,34 @@ class Handler(BaseHTTPRequestHandler):
             return
         player = self.client_address[0] not in own_ips()      # the TV, not ffprobe or Stremio desktop
         index_read = size > 256 * MB and start > size - 64 * MB   # the player reading the file's index, not playing
+        record = None
         if player:
-            t.open_requests[idx] += 1
+            Handler.tv_ip, Handler.tv_streamed_at = self.client_address[0], time.time()
+            with t.lock:
+                t.open_requests[idx] += 1
             if not index_read or idx not in t.positions:
                 t.positions[idx] = (0 if index_read else start, time.time())
+            record = {'at': round(self.t0, 2), 'idx': idx, 'start': start, 'sent': 0, 'took': 0, 'wait': 0, 'write': 0, 'ok': None}
+            t.requests.append(record)
         try:
-            ok = self.send_range(t, idx, start, end, t.patches_for(idx, f['name'], size), track=player and not index_read)
+            ok = self.send_range(t, idx, start, end, t.patches_for(idx, f['name'], size),
+                                 track=player and not index_read, record=record)
         finally:
             if player:
-                t.open_requests[idx] -= 1
+                with t.lock:
+                    t.open_requests[idx] -= 1
         took = time.time() - self.t0
         tm = getattr(self, 'timing', {})
-        if player:
-            t.requests.append({'at': round(self.t0, 2), 'idx': idx, 'start': start, 'sent': self.sent, 'took': round(took, 2),
-                               'wait': round(tm.get('wait', 0), 2), 'write': round(tm.get('write', 0), 2), 'ok': ok})
+        if record:
+            record.update(sent=self.sent, took=round(took, 2), wait=round(tm.get('wait', 0), 2),
+                          write=round(tm.get('write', 0), 2), ok=ok)
         log(f'{self.command} {ih[:8]}/{idx} {rng or "full"} -> {human(self.sent)} in {took:.1f}s'
             + (f' (waiting for pieces {tm["wait"]:.1f}s, reading {tm["read"]:.1f}s, sending {tm["write"]:.1f}s)' if tm else '')
             + ('' if ok else ' (ended early)'))
         if not ok:
             self.close_connection = True
 
-    def send_range(self, t, idx, start, end, patches=(), track=False):
+    def send_range(self, t, idx, start, end, patches=(), track=False, record=None):
         """Write file bytes [start, end] as their pieces arrive. False if the reader stopped early. With
         `track`, the position is kept for the dashboard as the bytes go out."""
         fs = layout(t.ti)
@@ -1306,9 +1349,18 @@ class Handler(BaseHTTPRequestHandler):
                 piece = (foff + pos) // plen
                 t0 = time.time()
                 t.want(rid, piece, last_piece)
-                ok = t.wait_piece(piece, CONFIG['piece_wait_s'])
+                tw = time.time()
+                mid = pos > start        # this request had data flowing before this piece held it up
+                if record is not None:
+                    t.waiting[rid] = (idx, tw, mid)
+                try:
+                    ok = t.wait_piece(piece, CONFIG['piece_wait_s'])
+                finally:
+                    t.waiting.pop(rid, None)
                 t1 = time.time()
                 timing['wait'] += t1 - t0
+                if record is not None and t1 - tw >= 3:
+                    t.stalls.append({'at': round(t1, 2), 'idx': idx, 'pos': pos, 'wait': round(t1 - tw, 1), 'mid': mid})
                 if not ok:
                     log(f'stream {t.ih[:8]}/{idx}: piece {piece} not available after {CONFIG["piece_wait_s"]}s')
                     return False
@@ -1334,6 +1386,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.sent += b - a
                 if track:
                     t.positions[idx] = (pos, time.time())
+                if record is not None:
+                    record['sent'] = self.sent
             return True
         except OSError:
             return False   # the player closed the connection — normal on every seek

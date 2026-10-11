@@ -243,6 +243,8 @@ test('which title each torrent belongs to is recorded for the dashboard', async 
     poster: 'https://images.metahub.space/poster/medium/tt7366338/img', at: titles[IH_GOOD].at,
   });
   assert.equal(typeof titles[IH_GOOD].at, 'number');
+  assert.equal(titles[`${IH_GOOD}:0`].episode, 2, 'per file too: a season pack shares its hash across episodes');
+  assert.equal(titles[`${IH_BAD}:4`].episode, 2);
   cleanup();
 });
 
