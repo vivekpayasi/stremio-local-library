@@ -3,6 +3,8 @@ addon.log
 cache.json
 collection-backups/
 addon-collection-backup.json
+advisor.json
+stream-facts.json
 
 # macOS
 .DS_Store

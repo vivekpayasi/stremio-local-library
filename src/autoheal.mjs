@@ -34,10 +34,10 @@ function certHash(certFile) {
   return parts.slice(1).join('.') || null;
 }
 
-const urlFor = (ip, hash, port) =>
-  `https://${ip.replaceAll('.', '-')}.${hash}:${port}/manifest.json`;
+const urlFor = (ip, hash, port, manifestPath) =>
+  `https://${ip.replaceAll('.', '-')}.${hash}:${port}${manifestPath}`;
 
-async function api(method, authKey, extra = {}) {
+export async function api(method, authKey, extra = {}) {
   const res = await fetch(`${API}/${method}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -51,9 +51,10 @@ async function api(method, authKey, extra = {}) {
 }
 
 async function backup(addons, log) {
-  await fsp.mkdir(BACKUP_DIR, { recursive: true });
+  // Configured addon URLs (Torrentio's, for one) can carry API keys: owner-only.
+  await fsp.mkdir(BACKUP_DIR, { recursive: true, mode: 0o700 });
   const f = path.join(BACKUP_DIR, `${new Date().toISOString().replace(/[:.]/g, '-')}.json`);
-  await fsp.writeFile(f, JSON.stringify({ savedAt: new Date().toISOString(), addons }, null, 2));
+  await fsp.writeFile(f, JSON.stringify({ savedAt: new Date().toISOString(), addons }, null, 2), { mode: 0o600 });
   // Keep the last 10 so this cannot grow without bound.
   const kept = (await fsp.readdir(BACKUP_DIR)).filter((n) => n.endsWith('.json')).sort();
   for (const old of kept.slice(0, -10)) await fsp.unlink(path.join(BACKUP_DIR, old)).catch(() => {});
@@ -64,18 +65,26 @@ async function backup(addons, log) {
 // Sitting right after Cinemeta puts the local rows near the top. Pass pinAfter: null to opt out.
 const CINEMETA = 'com.linvo.cinemeta';
 
+// One addon's get-modify-set must not interleave with another's: addonCollectionSet replaces the whole
+// collection, so the later write would silently undo the earlier one.
+let queue = Promise.resolve();
+
 function placeAfter(others, entry, anchorId) {
   const at = anchorId ? others.findIndex((a) => a?.manifest?.id === anchorId) : -1;
   if (at === -1) return null;
   return [...others.slice(0, at + 1), entry, ...others.slice(at + 1)];
 }
 
-export function startAutoHeal({ addonId, port, certFile, manifest, intervalMs = 60_000, log, pinAfter = CINEMETA }) {
+export function startAutoHeal({
+  addonId, port, certFile, manifest, manifestPath = '/manifest.json', intervalMs = 60_000, log, pinAfter = CINEMETA,
+  active = () => true,
+}) {
   let lastUrl = null;      // last URL we know is correct in the account
   let warnedSignedOut = false;
   let pin = pinAfter;      // cleared if the API turns out not to keep our ordering
 
   async function reconcile(reason) {
+    if (!active()) return;
     const ip = currentIp();
     if (!ip) return;
 
@@ -83,7 +92,7 @@ export function startAutoHeal({ addonId, port, certFile, manifest, intervalMs = 
     try { hash = certHash(certFile); } catch { return; }
     if (!hash) return;
 
-    const want = urlFor(ip, hash, port);
+    const want = urlFor(ip, hash, port, manifestPath);
     if (want === lastUrl && reason === 'tick') return; // nothing changed since last success
 
     const authKey = readAuthKey();
@@ -136,7 +145,7 @@ export function startAutoHeal({ addonId, port, certFile, manifest, intervalMs = 
     }
     if (!isPlaced(verify.addons)) {
       // Never fight the API over ordering: that would rewrite the collection every reconcile.
-      log('autoheal: account did not keep the addon order — leaving its position alone');
+      log(`autoheal: account did not keep the order of ${addonId} — leaving its position alone`);
       pin = null;
     }
 
@@ -152,13 +161,15 @@ export function startAutoHeal({ addonId, port, certFile, manifest, intervalMs = 
     } else if (!urlOk) {
       log(`autoheal: URL updated ${mine[0].transportUrl} -> ${want}${extra} (backup ${bkName})`);
     } else {
-      log(`autoheal: account entry updated — ${changes.join(', ')} (backup ${bkName})`);
+      log(`autoheal: account entry for ${addonId} updated — ${changes.join(', ')} (backup ${bkName})`);
     }
     lastUrl = want;
   }
 
-  const run = (reason) =>
-    reconcile(reason).catch((e) => log(`autoheal: ${e.message}`));
+  const run = (reason) => {
+    queue = queue.then(() => reconcile(reason)).catch((e) => log(`autoheal: ${addonId}: ${e.message}`));
+    return queue;
+  };
 
   run('startup');
   setInterval(() => run('tick'), intervalMs);

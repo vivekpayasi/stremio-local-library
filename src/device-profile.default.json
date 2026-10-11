@@ -1,0 +1,55 @@
+{
+  "name": "TCL Smart TV Pro · Android 12 · Amlogic · ~2 GB RAM · Stremio with ExoPlayer",
+  "about": [
+    "How well a stream should play on one TV. Every rule is a cap: a stream gets 5 stars minus nothing,",
+    "and each property it has limits it to at most `cap` stars. The lowest cap wins; `why` is what the TV",
+    "shows. {n} in a `why` is replaced by the number the rule measured. Anything not listed is fine.",
+    "To adapt this to another TV, put only the rules that differ in ~/.stremio-local-addon/device-profile.json,",
+    "e.g. {\"audio\": {\"truehd\": null}} for a TV that decodes TrueHD. Objects merge; lists replace.",
+    "Learned on this TV in Oct 2026: DV profile 8 plays in ExoPlayer (OMX.amlogic.dolby-vision.dvhe decoder);",
+    "TrueHD crashed ExoPlayer; a DV P7 + DTS-HD MA remux failed; mpv draws green stripes (use ExoPlayer)."
+  ],
+  "container": {
+    "mp4": { "cap": 4, "why": "MP4 — plays, but embedded subtitles may be hidden" },
+    "mp4-subs-hidden": { "cap": 4, "why": "embedded subtitles hidden (stored away from the video)" },
+    "avi": { "cap": 4, "why": "AVI — old container, seeking can be slow" }
+  },
+  "video": {
+    "avc10": { "cap": 2, "why": "10-bit H.264 — no hardware decoder" },
+    "av1": { "cap": 3, "why": "AV1 — untested on this TV" },
+    "vp9": { "cap": 4, "why": "VP9 — untested on this TV" },
+    "vc1": { "cap": 3, "why": "VC-1 — untested on this TV" },
+    "mpeg2": { "cap": 4, "why": "MPEG-2 video" }
+  },
+  "dolbyVision": {
+    "5": { "cap": 4, "why": "Dolby Vision profile 5 — untested on this TV" },
+    "7": { "cap": 1, "why": "Dolby Vision profile 7 (Blu-ray) — fails on this TV" },
+    "unknown": { "cap": 4, "why": "Dolby Vision profile unknown (may be profile 5)" }
+  },
+  "audio": {
+    "truehd": { "cap": 1, "why": "TrueHD audio — this TV can't decode it" },
+    "dts-hd": { "cap": 1, "why": "DTS-HD MA audio — this TV can't decode it" },
+    "dts": { "cap": 3, "why": "DTS audio — untested on this TV" },
+    "pcm": { "cap": 3, "why": "PCM audio — untested on this TV" },
+    "unknown": { "cap": 4, "why": "audio codec not in the release name" },
+    "mixed": { "cap": 2, "why": "{n} track may play first — this TV can't decode it" }
+  },
+  "resolution": {
+    "4320p": { "cap": 1, "why": "8K — beyond this TV" }
+  },
+  "tags": {
+    "remux": { "cap": 2, "why": "REMUX — ~60 Mbps with lossless audio" },
+    "upscale": { "cap": 2, "why": "AI upscale — often broken" },
+    "interpolated": { "cap": 2, "why": "frame-interpolated (RIFE) — often broken" },
+    "hfr": { "cap": 3, "why": "{n} fps — often AI-interpolated" }
+  },
+  "bitrate": [
+    { "above": 48, "cap": 2, "why": "{n} Mbps — too heavy to stream over Wi-Fi" },
+    { "above": 35, "cap": 3, "why": "{n} Mbps — may buffer on Wi-Fi" }
+  ],
+  "peers": [
+    { "atMost": 0, "cap": 1, "why": "dead swarm — no peers" },
+    { "atMost": 5, "cap": 2, "why": "only {n} peers — may never start" },
+    { "atMost": 14, "cap": 4, "why": "{n} peers — may start slowly" }
+  ]
+}

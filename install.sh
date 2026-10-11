@@ -142,7 +142,8 @@ echo
 bold "Installing"
 
 mkdir -p "$INSTALL_DIR"
-for f in addon.mjs autoheal.mjs auth.mjs urls.sh torrent_server.py; do
+for f in addon.mjs autoheal.mjs auth.mjs advisor.mjs rating.mjs device-profile.default.json urls.sh \
+         torrent_server.py stream_facts.py; do
   cp "$SRC_DIR/src/$f" "$INSTALL_DIR/$f"
 done
 chmod +x "$INSTALL_DIR/urls.sh"
@@ -253,6 +254,12 @@ echo "  On your TV:  Settings -> Server -> URL"
 echo "      https://$HOST:$TPORT/"
 echo "  (the libtorrent server; Stremio's own is still at :12470 if you ever want to switch back)"
 echo
+if grep -q "advisor: rating streams from" "$INSTALL_DIR/addon.log" 2>/dev/null; then
+  echo "  Stream Advisor is on: every Torrentio stream also appears under \"Stream Advisor\", rated"
+  echo "  1-5 for your TV. Uninstall Torrentio in Stremio to see each stream once (the advisor keeps"
+  echo "  using it). Adapt the ratings to another TV in $INSTALL_DIR/device-profile.json."
+  echo
+fi
 echo "  Whenever you change wifi, the URL changes. Click the menu bar icon to copy the current"
 echo "  one, or run:  $INSTALL_DIR/urls.sh"
 if [ -n "$SWIFTBAR_APP" ]; then

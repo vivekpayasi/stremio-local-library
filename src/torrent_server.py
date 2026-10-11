@@ -35,6 +35,8 @@ from pathlib import Path
 
 import libtorrent as lt
 
+from stream_facts import FFPROBE, FactStore, Prober, ffprobe_runner
+
 HOME = Path.home()
 INSTALL_DIR = HOME / '.stremio-local-addon'
 
@@ -63,6 +65,12 @@ CONFIG = {
     # the end of the file). ExoPlayer reads every track's samples, selected or not, so such a track
     # makes it jump across the file for every subtitle line and re-read the video — endless buffering.
     'hide_misplaced_mp4_subtitles': True,
+    # Once a file has been played, read its header with ffprobe and record what it really contains (codecs,
+    # Dolby Vision profile, bitrate) for the Stream Advisor. Delayed so the player's own startup reads go first.
+    'learn_from_plays': True,
+    'probe_delay_s': 20,
+    'ffprobe': FFPROBE,
+    'facts_file': str(INSTALL_DIR / 'stream-facts.json'),
 }
 CONFIG_FILE = Path(os.environ.get('TORRENTD_CONFIG', INSTALL_DIR / 'torrentd.json'))   # optional overrides, same keys
 if CONFIG_FILE.exists():
@@ -890,6 +898,7 @@ class Handler(BaseHTTPRequestHandler):
     server_version = 'stremio-libtorrent'
     timeout = 300
     engine = None   # set at startup
+    prober = None   # set at startup when ffprobe is available
 
     def log_message(self, fmt, *args):
         pass
@@ -919,6 +928,11 @@ class Handler(BaseHTTPRequestHandler):
             if m:
                 t = self.engine.find(m.group(1))
                 return self.json(t.debug() if t else None)
+            m = re.fullmatch(rf'/torrentd/probe/({IH})/(\d+)', path)
+            if m:
+                return self.probe(m.group(1).lower(), int(m.group(2)), (q.get('name') or [''])[0])
+            if path == '/torrentd/facts':
+                return self.json(self.prober.store.all() if self.prober else None)
             if self.command == 'OPTIONS' and re.match(rf'^/{IH}(/|$)', path):
                 return self.cors_preflight()
             m = re.fullmatch(rf'/({IH})/create', path)
@@ -1014,6 +1028,19 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---- torrent routes
 
+    def mp4_hidden(self, ih, idx):
+        """How many subtitle tracks the server hides in this MP4 (see patches_for)."""
+        t = self.engine.find(ih)
+        return {'mp4SubsHidden': len(t.mp4_patches.get(idx, [])) if t else 0}
+
+    def probe(self, ih, idx, name):
+        """Ask for a file's facts before anyone plays it (the advisor's optional background probe)."""
+        if not self.prober:
+            return self.json({'error': 'ffprobe not available'}, 503)
+        known = self.prober.store.get(f'{ih}:{idx}') is not None
+        queued = not known and self.prober.schedule(ih, idx, name, extra=lambda: self.mp4_hidden(ih, idx))
+        return self.json({'known': known, 'queued': queued})
+
     def create(self, ih, body):
         sources = parse_sources((body.get('peerSearch') or {}).get('sources'))
         torrent = body.get('torrent') or body.get('stream') or {}
@@ -1075,6 +1102,13 @@ class Handler(BaseHTTPRequestHandler):
                              + ('?download=1' if q.get('download') else ''))
             self.send_header('Content-Length', '0')
             return self.end_headers()
+        if self.prober and CONFIG['learn_from_plays']:
+            # A no-op once the file is known; ffprobe's own requests come back through here too.
+            try:
+                self.prober.schedule(ih, idx, f['name'], aliases=[f'{ih.lower()}:-1'] if idx_raw == '-1' else (),
+                                     delay=CONFIG['probe_delay_s'], extra=lambda: self.mp4_hidden(ih, idx))
+            except Exception as e:      # learning is optional; playback is not
+                log(f'facts {ih[:8]}/{idx}: could not schedule a probe — {type(e).__name__}: {e}')
 
         size = f['length']
         rng = self.headers.get('Range')
@@ -1323,6 +1357,11 @@ def tls_context():
 def main():
     engine = Engine()
     Handler.engine = engine
+    if os.access(CONFIG['ffprobe'], os.X_OK):
+        Handler.prober = Prober(FactStore(CONFIG['facts_file']), f'http://127.0.0.1:{CONFIG["http_port"]}', log,
+                                runner=ffprobe_runner(CONFIG['ffprobe']))
+    else:
+        log(f'stream facts off — no ffprobe at {CONFIG["ffprobe"]}')
     servers = []
     plain = PlainServer(('0.0.0.0', CONFIG['http_port']), Handler)
     servers.append(plain)
@@ -1337,7 +1376,8 @@ def main():
     log(f'libtorrent {lt.__version__} — listening on '
         + ', '.join(f'{"https" if isinstance(s, TLSServer) else "http"}:{s.server_address[1]}' for s in servers)
         + f'; other routes -> {CONFIG["upstream"]}; cache {CONFIG["cache_dir"]} (budget {CONFIG["cache_budget_gb"]} GB)'
-        + f'; download cap {CONFIG["download_limit_mbps"] or "none"} Mbps')
+        + f'; download cap {CONFIG["download_limit_mbps"] or "none"} Mbps'
+        + ('; learning stream facts from plays' if Handler.prober and CONFIG['learn_from_plays'] else ''))
 
     stop = threading.Event()
     signal.signal(signal.SIGTERM, lambda *_: stop.set())

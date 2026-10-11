@@ -115,6 +115,62 @@ Settings live at the top of `torrent_server.py`; override any of them in
 
 To go back to Stremio's own server, set the TV's Server URL to `:12470` again.
 
+### Stream Advisor
+
+Whether a torrent plays on a given TV is mostly decided before you press play: the container, the
+video and audio codecs, the Dolby Vision profile, the bitrate and the swarm. The **Stream Advisor**
+puts that verdict in Stremio's stream list, as 1–5 stars on every Torrentio stream:
+
+```
+★★★★★   ✓ verified · MKV · E-AC3 · DV P8 · 26 Mbps · 173 peers
+4k DV   Obsessão 2026 WEB-DL 2160p x265 DV HDR10 DUAL 5.1
+        👤 173 💾 20.03 GB ⚙️ BluDV
+
+★☆☆☆☆   ✗ TrueHD audio — this TV can't decode it · verified
+4k DV   Obsession (2026) (2160p UHD BluRay x265 10bit DV HDR TrueHD Atmos 7.1 … r00t)
+```
+
+Stremio shows each addon's streams as that addon sends them, so the advisor is an addon of its own
+(served by the same service at `/advisor/manifest.json`). It asks your Torrentio for the list, rates
+each stream and hands back the very same streams with the stars added — playback still goes through
+the torrent server exactly as before. It finds your Torrentio (including its configuration) in your
+Stremio account on first start, saves it to `~/.stremio-local-addon/advisor.json`, and registers
+itself right after Local Library. Once you're happy with it, **uninstall Torrentio** in Stremio so
+each stream is listed once; the advisor keeps using it. If Torrentio isn't in your account, the
+advisor stays off.
+
+**How streams are rated.** The rules for one TV live in a *device profile*,
+[`src/device-profile.default.json`](src/device-profile.default.json). Every rule is a cap — "TrueHD audio: at most 1
+star", "MP4: at most 4", "over 48 Mbps: at most 2", "5 peers or fewer: at most 2" — and a stream gets
+the lowest cap it hits, with that rule's reason shown. The shipped profile is a TCL Android TV with an
+Amlogic chip running Stremio's ExoPlayer, learned from real plays: Dolby Vision profile 8 plays, profile
+7 (UHD Blu-ray remuxes) fails, TrueHD and DTS-HD MA can't be decoded, MP4s are fine because the torrent
+server hides misplaced subtitle tracks, and AV1 is untested so far. For another TV, override only what
+differs in `~/.stremio-local-addon/device-profile.json` — objects merge, `null` removes a rule:
+
+```json
+{ "audio": { "truehd": null, "dts-hd": null }, "dolbyVision": { "7": null } }
+```
+
+**Verified ratings.** A release name is a guess. Whenever the torrent server plays a file, it reads
+the file's header once with ffprobe (bundled with Stremio desktop), about 20 seconds in, and records
+what is really inside — codecs, which audio track plays first, Dolby Vision profile, real bitrate,
+hidden subtitle tracks — in `~/.stremio-local-addon/stream-facts.json`. From then on that stream is
+rated from those facts and marked **verified**. Turn this off with `{"learn_from_plays": false}` in
+`torrentd.json`.
+
+Settings in `advisor.json`:
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `upstreams` | your Torrentio | stream addons whose lists are rated, `[{ "name", "url" }]` |
+| `sort` | `"original"` | `"rating"` lists the best-rated streams first |
+| `probe.enabled` | `false` | also probe the top `probe.top` unplayed streams of each list in the background (a few MB each), so their ratings are verified next time |
+| `enabled` | `true` | `false` turns the advisor off |
+
+`https://<host>:12471/advisor/health` shows the profile in use and how many files have verified facts;
+`addon.log` has one line per list rated.
+
 ### Menu bar icon
 
 The installer offers to add a status icon to the menu bar. It is a small
@@ -197,6 +253,13 @@ launchctl kickstart -k gui/$(id -u)/com.local.stremio-torrent  # restart the tor
 ./uninstall.sh                                                 # remove
 ```
 
+Tests (no dependencies):
+
+```bash
+node --test                                                    # rating rules and the advisor
+~/.stremio-local-addon/venv/bin/python -m unittest discover -s tests   # stream facts
+```
+
 ## Configuration
 
 Edit the `CONFIG` block at the top of `~/.stremio-local-addon/addon.mjs`, then restart:
@@ -225,7 +288,8 @@ skipped and why the rest were grouped as they were.
 the filename. Rename to `Show.Name.S01E03.…` and restart the service.
 
 **Playback fails on the TV.** The file has to be decodable by the TV — there is no transcoding.
-H.264 and HEVC with AAC/AC3 are safe; exotic audio like DTS-HD may not play. Embedded PGS
+H.264 and HEVC with AAC/AC3 are safe; exotic audio like DTS-HD may not play. The Stream Advisor's
+stars say this up front for torrents. Embedded PGS
 subtitles are bitmap-based and often won't render — use an external `.srt` instead.
 
 **The addon vanished after changing networks.** Give the watcher a minute, then restart the TV
@@ -235,8 +299,10 @@ app so it re-syncs your addon collection.
 
 The self-healing feature reads your Stremio `authKey` from the desktop app's local storage on
 demand — it is never copied or written to disk — and uses it only against `api.strem.io` to keep
-the addon's URL current. The full addon collection is backed up to
-`~/.stremio-local-addon/collection-backups/` before every change.
+the addons' URLs current and, once, to find your Torrentio for the Stream Advisor. Your Torrentio
+URL can contain a debrid key, so `advisor.json` is readable only by you and logs show only its
+host. The full addon collection is backed up to `~/.stremio-local-addon/collection-backups/` before
+every change. The uninstaller removes both addons and, if you had removed Torrentio, puts it back.
 
 ## Limitations
 

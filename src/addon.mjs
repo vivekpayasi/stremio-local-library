@@ -13,6 +13,7 @@ import crypto from 'node:crypto';
 import os from 'node:os';
 
 import { startAutoHeal } from './autoheal.mjs';
+import { createAdvisor } from './advisor.mjs';
 
 const HOME = os.homedir();
 
@@ -40,6 +41,9 @@ const MIME = {
 };
 
 const log = (...a) => console.log(new Date().toISOString(), ...a);
+
+// A second addon in this process: Torrentio's streams, rated for the TV. See advisor.mjs.
+const advisor = createAdvisor({ log });
 
 // ---------------------------------------------------------------- library index
 
@@ -516,6 +520,11 @@ async function handle(req, res) {
 
   if (p === '/manifest.json') return sendJson(res, manifest());
 
+  if (p.startsWith('/advisor/')) {
+    const body = await advisor.route(p);
+    if (body) return sendJson(res, body);
+  }
+
   if (p === '/health') {
     return sendJson(res, {
       ok: true, files: LIBRARY.size, shows: SERIES.size, roots: CONFIG.roots, base,
@@ -661,6 +670,22 @@ async function main() {
         manifest,
         log,
       });
+
+      // The advisor registers itself once it knows whose streams to rate; it sits right after this addon.
+      const startAdvisor = () => advisor.start({
+        onReady: () => startAutoHeal({
+          addonId: advisor.manifest().id,
+          manifestPath: '/advisor/manifest.json',
+          port: CONFIG.port,
+          certFile: CONFIG.certFile,
+          manifest: advisor.manifest,
+          pinAfter: manifest().id,
+          active: advisor.active,
+          log,
+        }),
+      }).then((ok) => ok, (e) => { log(`advisor: ${e.message}`); return false; })
+        .then((ok) => { if (!ok) setTimeout(startAdvisor, 10 * 60_000); });
+      startAdvisor();
     }
   });
 }
