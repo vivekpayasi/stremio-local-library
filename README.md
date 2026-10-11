@@ -143,13 +143,15 @@ advisor stays off.
 [`src/device-profile.default.json`](src/device-profile.default.json). Every rule is a cap — "TrueHD audio: at most 1
 star", "MP4: at most 4", "over 48 Mbps: at most 2", "5 peers or fewer: at most 2" — and a stream gets
 the lowest cap it hits, with that rule's reason shown. The shipped profile is a TCL Android TV with an
-Amlogic chip running Stremio's ExoPlayer, learned from real plays: Dolby Vision profile 8 plays, profile
-7 (UHD Blu-ray remuxes) fails, TrueHD and DTS-HD MA can't be decoded, MP4s are fine because the torrent
-server hides misplaced subtitle tracks, and AV1 is untested so far. For another TV, override only what
-differs in `~/.stremio-local-addon/device-profile.json` — objects merge, `null` removes a rule:
+Amlogic chip running Stremio's ExoPlayer, learned from real plays and from the decoder list the TV
+reports over ADB: Dolby Vision profile 8 plays, profile 7 (UHD Blu-ray remuxes) fails in the TV's Dolby
+Vision decoder, TrueHD can't be decoded, DTS and DTS-HD MA play (the TV decodes the DTS core itself),
+MP4s are fine because the torrent server hides misplaced subtitle tracks, and AV1, VP9 and VC-1 have
+decoders but haven't been played yet. For another TV, override only what differs in
+`~/.stremio-local-addon/device-profile.json` — objects merge, `null` removes a rule:
 
 ```json
-{ "audio": { "truehd": null, "dts-hd": null }, "dolbyVision": { "7": null } }
+{ "audio": { "truehd": null, "dts-hd": { "cap": 1, "why": "DTS-HD MA — this TV can't decode it" } } }
 ```
 
 **Verified ratings.** A release name is a guess. Whenever the torrent server plays a file, it reads

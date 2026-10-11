@@ -6,8 +6,12 @@
     "shows. {n} in a `why` is replaced by the number the rule measured. Anything not listed is fine.",
     "To adapt this to another TV, put only the rules that differ in ~/.stremio-local-addon/device-profile.json,",
     "e.g. {\"audio\": {\"truehd\": null}} for a TV that decodes TrueHD. Objects merge; lists replace.",
-    "Learned on this TV in Oct 2026: DV profile 8 plays in ExoPlayer (OMX.amlogic.dolby-vision.dvhe decoder);",
-    "TrueHD crashed ExoPlayer; a DV P7 + DTS-HD MA remux failed; mpv draws green stripes (use ExoPlayer)."
+    "Learned on this TV (Oct 2026), from real plays and its decoder list (adb: /vendor/etc/media_codecs*.xml):",
+    "DV profile 8 plays (OMX.amlogic.dolby-vision.dvhe decoder); DV profile 7 fails in that decoder",
+    "(NO_EXCEEDS_CAPABILITIES dvhe.07.06); DTS and DTS-HD MA play: ExoPlayer passes DTS to the TV's audio chip,",
+    "which decodes the core (on TV speakers; an HDMI soundbar may differ). There is no TrueHD decoder and TrueHD",
+    "crashed ExoPlayer. AV1 and VP9 have hardware decoders up to 4K, VC-1 and MPEG-2 up to 1080p, none played yet.",
+    "mpv draws green stripes on this TV: use ExoPlayer."
   ],
   "container": {
     "mp4": { "cap": 4, "why": "MP4 — plays, but embedded subtitles may be hidden" },
@@ -16,10 +20,10 @@
   },
   "video": {
     "avc10": { "cap": 2, "why": "10-bit H.264 — no hardware decoder" },
-    "av1": { "cap": 3, "why": "AV1 — untested on this TV" },
-    "vp9": { "cap": 4, "why": "VP9 — untested on this TV" },
-    "vc1": { "cap": 3, "why": "VC-1 — untested on this TV" },
-    "mpeg2": { "cap": 4, "why": "MPEG-2 video" }
+    "av1": { "cap": 4, "why": "AV1 — decoder present, not played yet" },
+    "vp9": { "cap": 4, "why": "VP9 — decoder present, not played yet" },
+    "vc1": { "cap": 4, "why": "VC-1 — decoder present, not played yet" },
+    "mpeg2": { "cap": 4, "why": "MPEG-2 — decoder present, not played yet" }
   },
   "dolbyVision": {
     "5": { "cap": 4, "why": "Dolby Vision profile 5 — untested on this TV" },
@@ -28,9 +32,7 @@
   },
   "audio": {
     "truehd": { "cap": 1, "why": "TrueHD audio — this TV can't decode it" },
-    "dts-hd": { "cap": 1, "why": "DTS-HD MA audio — this TV can't decode it" },
-    "dts": { "cap": 3, "why": "DTS audio — untested on this TV" },
-    "pcm": { "cap": 3, "why": "PCM audio — untested on this TV" },
+    "pcm": { "cap": 4, "why": "PCM audio — not played yet" },
     "unknown": { "cap": 4, "why": "audio codec not in the release name" },
     "mixed": { "cap": 2, "why": "{n} track may play first — this TV can't decode it" }
   },

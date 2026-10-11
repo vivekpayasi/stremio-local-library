@@ -93,10 +93,11 @@ test('TrueHD in the release name rates 1 star', () => {
   assert.match(issueText(r), /TrueHD/);
 });
 
-test('DTS-HD MA with a Blu-ray REMUX rates 1 star', () => {
+test('a Blu-ray REMUX with Dolby Vision rates 1 star for its profile 7 video, not its DTS-HD audio', () => {
   const r = rate(FRAMESTOR, { profile: PROFILE, runtimeMin: 65 });
   assert.equal(r.stars, 1);
-  assert.match(issueText(r), /DTS-HD/);
+  assert.match(issueText(r), /profile 7/);
+  assert.doesNotMatch(issueText(r), /DTS/);
 });
 
 test('an explicit DV P7 remux rates 1 star', () => {
@@ -160,10 +161,10 @@ test('10-bit H.264 (Hi10P) rates 2 stars', () => {
   assert.equal(rate(s, { profile: PROFILE, runtimeMin: 24 }).stars, 2);
 });
 
-test('AV1 is untested on this TV: 3 stars', () => {
+test('AV1 has a hardware decoder but has not been played yet: 4 stars', () => {
   const s = tio('4k', 'Movie.2024.2160p.WEB-DL.DDP5.1.AV1-XYZ\n👤 50 💾 8.00 GB ⚙️ X', 'Movie.2024.2160p.WEB-DL.DDP5.1.AV1-XYZ.mkv');
   const r = rate(s, { profile: PROFILE, runtimeMin: 120 });
-  assert.equal(r.stars, 3);
+  assert.equal(r.stars, 4);
   assert.match(issueText(r), /AV1/);
 });
 
@@ -198,10 +199,13 @@ test('only a Blu-ray remux implies Dolby Vision profile 7', () => {
   assert.match(issueText(rate(uhd, { profile: PROFILE })), /profile 7/);
 });
 
-test('DTS-HD MA written as one word is still DTS-HD MA', () => {
-  for (const tag of ['DTS-HDMA', 'DTSHDMA', 'DTS-HD.MA']) {
+test('DTS-HD MA plays on this TV (it decodes the DTS core), however it is spelled', () => {
+  // Verified 2026-10-12: Chernobyl S01E01 1080p DTS-HD.MA x264 played with picture and sound in ExoPlayer.
+  for (const tag of ['DTS-HD.MA', 'DTS-HDMA', 'DTSHDMA']) {
     const s = tio('1080p', `Movie.2010.1080p.BluRay.x264.${tag}.5.1-XYZ\n👤 50 💾 9.00 GB ⚙️ X`, `Movie.2010.1080p.BluRay.x264.${tag}.5.1-XYZ.mkv`);
-    assert.equal(rate(s, { profile: PROFILE, runtimeMin: 120 }).stars, 1, tag);
+    const r = rate(s, { profile: PROFILE, runtimeMin: 120 });
+    assert.equal(r.stars, 5, `${tag}: ${issueText(r)}`);
+    assert.ok(r.summary.includes('DTS-HD MA'), `${tag}: ${r.summary.join(' · ')}`);
   }
 });
 
@@ -272,11 +276,11 @@ test('verified: BluDV (DV P8, E-AC3, 26 Mbps) rates 5 stars even though its name
   assert.equal(r.estimated, false);
 });
 
-test('verified: FraMeSToR (DV P7 FEL, DTS-HD MA, 59.5 Mbps) rates 1 star', () => {
+test('verified: FraMeSToR (DV P7 FEL, DTS-HD MA, 59.5 Mbps) rates 1 star for the video', () => {
   const r = rate(FRAMESTOR, { profile: PROFILE, runtimeMin: 65, facts: FACTS.framestor });
   assert.equal(r.stars, 1);
   assert.match(issueText(r), /profile 7/);
-  assert.match(issueText(r), /DTS-HD/);
+  assert.doesNotMatch(issueText(r), /DTS/);
 });
 
 // ------------------------------------------------------------------ device profile
