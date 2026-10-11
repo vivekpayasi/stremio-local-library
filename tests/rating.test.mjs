@@ -230,7 +230,7 @@ test('debrid streams keep their [RD+] tag and are not judged by peers', () => {
   };
   const r = rate(s, { profile: PROFILE, runtimeMin: 120 });
   assert.equal(r.stars, 5, issueText(r));
-  assert.equal(decorate(s, r).name, '★★★★★ [RD+]\n4k DV | HDR');
+  assert.equal(decorate(s, r).name, '⭐⭐⭐⭐⭐ [RD+]\n4k DV | HDR');
 });
 
 test('one malformed upstream stream is passed through, not fatal to the list', () => {
@@ -238,7 +238,16 @@ test('one malformed upstream stream is passed through, not fatal to the list', (
   const out = adviseStreams([null, odd, ACCID], { profile: PROFILE, runtimeMin: 65 });
   assert.equal(out.length, 2);
   assert.equal(out[0], odd);
-  assert.match(out[1].name, /^★★★★★/);
+  assert.match(out[1].name, /^⭐⭐⭐⭐⭐\n/u);
+});
+
+test('an hdr rule caps HDR streams on a screen that cannot show them; HDR10+ falls back to the HDR10 rule', () => {
+  const profile = mergeProfile(PROFILE, { hdr: { hdr10: { cap: 2, why: 'HDR10 — this screen can\'t show HDR' } } });
+  const hdr = tio('4k HDR', 'Movie.2024.2160p.WEB-DL.DDP5.1.HDR10.H.265-XYZ\n👤 80 💾 15.00 GB ⚙️ X', 'Movie.2024.2160p.WEB-DL.DDP5.1.HDR10.H.265-XYZ.mkv');
+  const plus = tio('4k HDR10+', 'Movie.2024.2160p.WEB-DL.DDP5.1.HDR10+.H.265-XYZ\n👤 80 💾 15.00 GB ⚙️ X', 'Movie.2024.2160p.WEB-DL.DDP5.1.HDR10+.H.265-XYZ.mkv');
+  assert.equal(rate(hdr, { profile, runtimeMin: 120 }).stars, 2);
+  assert.equal(rate(plus, { profile, runtimeMin: 120 }).stars, 2);
+  assert.equal(rate(hdr, { profile: PROFILE, runtimeMin: 120 }).stars, 5);
 });
 
 // ------------------------------------------------------------------ verified facts win
@@ -295,7 +304,7 @@ test('a profile override changes the verdict (a TV that decodes TrueHD)', () => 
 
 test('decorate puts stars in the name and reasons above Torrentio\'s own text', () => {
   const out = decorate(R00T, rate(R00T, { profile: PROFILE, runtimeMin: 109 }));
-  assert.equal(out.name, '★☆☆☆☆\n4k DV | HDR');
+  assert.equal(out.name, '⭐\n4k DV | HDR');
   const [first, ...rest] = out.title.split('\n');
   assert.match(first, /^✗ TrueHD/);
   assert.equal(rest.join('\n'), R00T.title);
@@ -313,7 +322,7 @@ test('decorate summarises a good stream and marks verified facts', () => {
 test('decorate keeps a description field when the upstream uses one', () => {
   const s = { name: 'MediaFusion\n4K', description: 'Movie.2024.2160p.WEB-DL.DDP5.1.H.265-XYZ\n👤 40 💾 10 GB', infoHash: hash('c') };
   const out = decorate(s, rate(s, { profile: PROFILE, runtimeMin: 120 }));
-  assert.equal(out.name, '★★★★★\n4K');
+  assert.equal(out.name, '⭐⭐⭐⭐⭐\n4K');
   assert.equal(out.title, undefined);
   assert.match(out.description, /^✓ MKV|^✓ E-AC3|^✓ /);
 });
@@ -321,7 +330,7 @@ test('decorate keeps a description field when the upstream uses one', () => {
 test('adviseStreams keeps the upstream order unless asked to sort by rating', () => {
   const list = [R00T, ACCID, web(3)];
   const ctx = { profile: PROFILE, runtimeMin: 100, factsFor: () => null };
-  assert.deepEqual(adviseStreams(list, ctx).map((s) => s.name[0]), ['★', '★', '★']);
+  assert.deepEqual(adviseStreams(list, ctx).map((s) => s.name.split('\n')[0]), ['⭐', '⭐⭐⭐⭐⭐', '⭐⭐']);
   assert.deepEqual(adviseStreams(list, ctx).map((s) => s.infoHash), list.map((s) => s.infoHash));
   const sorted = adviseStreams(list, { ...ctx, sort: 'rating' });
   assert.deepEqual(sorted.map((s) => s.infoHash), [ACCID, web(3), R00T].map((s) => s.infoHash));

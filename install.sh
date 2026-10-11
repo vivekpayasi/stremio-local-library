@@ -142,7 +142,7 @@ echo
 bold "Installing"
 
 mkdir -p "$INSTALL_DIR"
-for f in addon.mjs autoheal.mjs auth.mjs advisor.mjs rating.mjs device-profile.default.json urls.sh \
+for f in addon.mjs autoheal.mjs auth.mjs advisor.mjs rating.mjs device-profile.default.json make-profile.mjs urls.sh \
          torrent_server.py stream_facts.py; do
   cp "$SRC_DIR/src/$f" "$INSTALL_DIR/$f"
 done

@@ -1,0 +1,1 @@
+HdrCapabilities{mSupportedHdrTypes=[1, 2, 3, 4], mMaxLuminance=500.0, mMaxAverageLuminance=500.0, mMinLuminance=0.0}

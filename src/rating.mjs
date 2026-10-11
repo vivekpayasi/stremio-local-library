@@ -201,6 +201,11 @@ export function rate(stream, { profile, facts = null, runtimeMin = null } = {}) 
   if (videoKey) add(ruleOf(profile.video?.[videoKey], `${videoKey} video`));
   if (dv != null) add(ruleOf(profile.dolbyVision?.[String(dv)], `Dolby Vision profile ${dv}`));
   if (resolution) add(ruleOf(profile.resolution?.[resolution], resolution));
+  // The screen: HDR it cannot show. HDR10+ carries an HDR10 picture, so the HDR10 rule covers it too.
+  if (hdr && hdr !== 'SDR') {
+    const key = hdr.toLowerCase();
+    add(ruleOf(profile.hdr?.[key] !== undefined ? profile.hdr[key] : key === 'hdr10+' ? profile.hdr?.hdr10 : null, hdr));
+  }
 
   // Audio: a verified file is judged by the track the player starts on.
   const rulesFor = (c) => ruleOf(profile.audio?.[c], `${audioLabel(c)} audio`);
@@ -266,7 +271,11 @@ export function rate(stream, { profile, facts = null, runtimeMin = null } = {}) 
 
 // ---------------------------------------------------------------- display
 
-const starsOf = (n) => '★'.repeat(n) + '☆'.repeat(5 - n);
+// One coloured ⭐ per point: filled and hollow ★☆ glyphs blur together at TV viewing distance.
+export const starsOf = (n) => '⭐'.repeat(n);
+
+/** The stars a decorated stream shows (0 when it was passed through unrated). */
+export const starsIn = (stream) => (String(stream?.name ?? '').split('\n')[0].match(/⭐/gu) ?? []).length;
 
 /**
  * The same stream with its rating shown: stars in the name (the short left column on the TV), and a

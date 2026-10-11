@@ -119,14 +119,14 @@ To go back to Stremio's own server, set the TV's Server URL to `:12470` again.
 
 Whether a torrent plays on a given TV is mostly decided before you press play: the container, the
 video and audio codecs, the Dolby Vision profile, the bitrate and the swarm. The **Stream Advisor**
-puts that verdict in Stremio's stream list, as 1–5 stars on every Torrentio stream:
+puts that verdict in Stremio's stream list, as 1–5 ⭐ on every Torrentio stream:
 
 ```
-★★★★★   ✓ verified · MKV · E-AC3 · DV P8 · 26 Mbps · 173 peers
+⭐⭐⭐⭐⭐  ✓ verified · MKV · E-AC3 · DV P8 · 26 Mbps · 173 peers
 4k DV   Obsessão 2026 WEB-DL 2160p x265 DV HDR10 DUAL 5.1
         👤 173 💾 20.03 GB ⚙️ BluDV
 
-★☆☆☆☆   ✗ TrueHD audio — this TV can't decode it · verified
+⭐         ✗ TrueHD audio — this TV can't decode it · verified
 4k DV   Obsession (2026) (2160p UHD BluRay x265 10bit DV HDR TrueHD Atmos 7.1 … r00t)
 ```
 
@@ -153,6 +153,23 @@ decoders but haven't been played yet. For another TV, override only what differs
 ```json
 { "audio": { "truehd": null, "dts-hd": { "cap": 1, "why": "DTS-HD MA — this TV can't decode it" } } }
 ```
+
+**A profile for another TV.** Android TVs report what they can decode, profile by profile — including
+which Dolby Vision profiles their decoder accepts — and which HDR formats the screen shows. With ADB on,
+`make-profile.mjs` reads that and writes the matching profile:
+
+```bash
+brew install --cask android-platform-tools                         # adb, once
+node ~/.stremio-local-addon/make-profile.mjs 192.168.1.40          # what the TV supports, and the profile
+node ~/.stremio-local-addon/make-profile.mjs 192.168.1.40 --write  # save it as device-profile.json
+```
+
+On the TV first: Settings → Device Preferences → About → select **Build** seven times, then Developer
+options → **USB debugging** and **Network debugging** on, and accept *Allow debugging?* when the Mac
+connects. On the TCL TV the report predicted every result its real plays gave — no Dolby Vision profile
+7 in the decoder, DTS listed, no TrueHD — but a listed decoder is still not a play, so codecs that are
+rare in practice stay at 4 stars until you have watched one. The advisor picks up a new profile on the
+next stream list; no restart. Turn debugging off again on the TV when you're done.
 
 **Verified ratings.** A release name is a guess. Whenever the torrent server plays a file, it reads
 the file's header once with ffprobe (bundled with Stremio desktop), about 20 seconds in, and records
@@ -258,7 +275,7 @@ launchctl kickstart -k gui/$(id -u)/com.local.stremio-torrent  # restart the tor
 Tests (no dependencies):
 
 ```bash
-node --test                                                    # rating rules and the advisor
+node --test                                                    # rating rules, the advisor, make-profile
 ~/.stremio-local-addon/venv/bin/python -m unittest discover -s tests   # stream facts
 ```
 

@@ -90,8 +90,8 @@ test('streams come back rated, unchanged where it matters, with verified facts u
   const { advisor, requests, cleanup } = setup({ config: CONFIGURED, facts: { [`${IH_GOOD}:0`]: FACT_GOOD } });
   const { streams } = await advisor.route('/advisor/stream/movie/tt37287335.json');
   assert.equal(streams.length, 2);
-  assert.match(streams[0].name, /^★☆☆☆☆\n/);
-  assert.match(streams[1].name, /^★★★★★\n/);
+  assert.match(streams[0].name, /^⭐\n/u);
+  assert.match(streams[1].name, /^⭐{5}\n/u);
   assert.match(streams[1].title, /^✓ verified · MKV · E-AC3 · DV P8 · 26 Mbps · 173 peers\n/);
   for (const [i, s] of streams.entries()) {
     assert.equal(s.infoHash, STREAMS[i].infoHash);
@@ -167,7 +167,7 @@ test('a device profile override file changes ratings', async () => {
   const { advisor, files, cleanup } = setup({ config: CONFIGURED });
   fs.writeFileSync(files.profile, JSON.stringify({ audio: { truehd: null } }));
   const { streams } = await advisor.route('/advisor/stream/movie/tt1.json');
-  assert.match(streams[0].name, /^★★★★★/);
+  assert.match(streams[0].name, /^⭐{5}\n/u);
   cleanup();
 });
 

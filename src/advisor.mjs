@@ -13,7 +13,7 @@ import path from 'node:path';
 
 import { readAuthKey } from './auth.mjs';
 import { api } from './autoheal.mjs';
-import { adviseStreams, defaultProfile, mergeProfile } from './rating.mjs';
+import { adviseStreams, defaultProfile, mergeProfile, starsIn } from './rating.mjs';
 
 const DIR = path.join(os.homedir(), '.stremio-local-addon');
 export const ADVISOR_FILES = {
@@ -43,7 +43,7 @@ export const advisorManifest = () => ({
   id: ADDON_ID,
   version: '1.0.0',
   name: 'Stream Advisor',
-  description: 'Torrentio streams rated ★1–5 for how well they play on this TV (codecs, Dolby Vision, '
+  description: 'Torrentio streams rated 1–5 ⭐ for how well they play on this TV (codecs, Dolby Vision, '
     + 'bitrate, peers), with the reasons in each stream\'s description.',
   resources: ['stream'],
   types: ['movie', 'series'],
@@ -216,9 +216,9 @@ export function createAdvisor({
     const out = adviseStreams(all, { profile: profile(), runtimeMin: runtime, factsFor, sort: cfg.sort });
     if (cfg.probe.enabled) probeTop(all, factsFor, cfg);
 
-    const hist = [1, 2, 3, 4, 5].map((n) => out.filter((s) => String(s.name).startsWith('★'.repeat(n) + '☆'.repeat(5 - n))).length);
+    const hist = [1, 2, 3, 4, 5].map((n) => out.filter((s) => starsIn(s) === n).length);
     const verified = all.filter((s) => factsFor(s)).length;
-    log(`advisor: ${type} ${id} — ${all.length} stream(s) in ${Date.now() - t0} ms; ★1–5: ${hist.join('/')}`
+    log(`advisor: ${type} ${id} — ${all.length} stream(s) in ${Date.now() - t0} ms; ⭐1–5: ${hist.join('/')}`
       + `${verified ? `; ${verified} verified` : ''}${runtime ? '' : '; no runtime, no bitrate estimates'}`);
     return out;
   }
