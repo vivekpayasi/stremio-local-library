@@ -244,3 +244,13 @@ the addon's URL current. The full addon collection is backed up to
 - No transcoding — the client must be able to decode the file natively.
 - LAN only by design. For access across different networks, put both devices on a Tailscale
   network and serve under a `*.ts.net` certificate instead.
+
+## Legal
+
+This project doesn't host, index or distribute any content. The library addon serves files from your
+own disk, and the torrent server only fetches what your own Stremio addons point it to. You are
+responsible for making sure you have the right to watch whatever you play with it.
+
+## License
+
+[MIT](LICENSE) © 2026 Vivek Payasi
