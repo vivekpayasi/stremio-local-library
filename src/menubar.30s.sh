@@ -31,6 +31,7 @@ HASH=${DOMAIN#*.}
 
 footer() {
   echo "---"
+  echo "Open dashboard | href=http://localhost:11472/ui sfimage=gauge.with.dots.needle.67percent"
   echo "Open Stremio | bash=/usr/bin/open param1=-a param2=Stremio terminal=false refresh=true sfimage=play.rectangle"
   echo "Restart addon | bash=/bin/launchctl param1=kickstart param2=-k param3=gui/$(/usr/bin/id -u)/$LABEL terminal=false refresh=true sfimage=arrow.clockwise"
   echo "Restart torrent server | bash=/bin/launchctl param1=kickstart param2=-k param3=gui/$(/usr/bin/id -u)/$TLABEL terminal=false refresh=true sfimage=arrow.clockwise"
@@ -91,6 +92,12 @@ echo "TV  ›  Settings  ›  Server URL | size=11"
 echo "$TV_URL | bash=\"$SELF\" param1=copy param2=$TV_URL param3=\"TV Server URL\" terminal=false sfimage=doc.on.doc"
 echo "Addon install URL | size=11"
 echo "$ADDON_URL | bash=\"$SELF\" param1=copy param2=$ADDON_URL param3=\"addon install URL\" terminal=false sfimage=doc.on.doc"
+# The dashboard opens on other devices only when torrentd.json says "dashboard_lan": true.
+if /usr/bin/grep -q '"dashboard_lan"[[:space:]]*:[[:space:]]*true' "$INSTALL_DIR/torrentd.json" 2>/dev/null; then
+  PHONE_URL="https://$HOST:12472/ui"
+  echo "Dashboard on your phone | size=11"
+  echo "$PHONE_URL | bash=\"$SELF\" param1=copy param2=$PHONE_URL param3=\"dashboard URL\" terminal=false sfimage=iphone"
+fi
 
 # Last library scan and last self-heal result, straight from the addon's log.
 if [ -f "$LOG" ]; then

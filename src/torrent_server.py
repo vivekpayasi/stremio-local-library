@@ -12,6 +12,7 @@ ahead of it and a read-ahead window beyond that. Downloaded pieces stay on disk,
 from disk; inactive torrents are deleted oldest-first once the cache exceeds its budget.
 """
 import bisect
+import collections
 import http.client
 import json
 import mimetypes
@@ -35,6 +36,7 @@ from pathlib import Path
 
 import libtorrent as lt
 
+from dashboard import PAGE as DASHBOARD_PAGE, Dashboard, last_tv_ip
 from stream_facts import FFPROBE, FactStore, Prober, ffprobe_runner
 
 HOME = Path.home()
@@ -71,6 +73,10 @@ CONFIG = {
     'probe_delay_s': 20,
     'ffprobe': FFPROBE,
     'facts_file': str(INSTALL_DIR / 'stream-facts.json'),
+    # The dashboard at /ui shows what is being watched, so by default only this Mac can open it. True lets
+    # any device on the network (a phone) open it too.
+    'dashboard_lan': False,
+    'dashboard_tv_adb': True,          # read the TV's state over ADB for the dashboard, when the TV allows it
 }
 CONFIG_FILE = Path(os.environ.get('TORRENTD_CONFIG', INSTALL_DIR / 'torrentd.json'))   # optional overrides, same keys
 if CONFIG_FILE.exists():
@@ -125,6 +131,43 @@ def log(*a):
 
 def human(n):
     return f'{n / MB:.1f}MB' if n < 1024 * MB else f'{n / 1024 / MB:.2f}GB'
+
+
+_own = {'at': 0.0, 'ips': set()}
+
+
+def own_ips():
+    """This Mac's addresses: requests from them are Stremio desktop's server, not the TV."""
+    if time.time() - _own['at'] > 60:
+        ips = {'127.0.0.1', '::1'}
+        for line in subprocess.run(['ifconfig'], capture_output=True, text=True).stdout.splitlines():
+            m = re.match(r'\s+inet6? ([0-9a-f.:]+)', line)
+            if m:
+                ips.add(m.group(1).split('%')[0])
+        _own.update(at=time.time(), ips=ips)
+    return _own['ips']
+
+
+def _tail_log(size=512 * 1024):
+    try:
+        with open(INSTALL_DIR / 'torrent.log', 'rb') as f:
+            f.seek(0, os.SEEK_END)
+            f.seek(max(0, f.tell() - size))
+            return f.read().decode(errors='replace')
+    except OSError:
+        return ''
+
+
+def phone_url():
+    """The dashboard's address for other devices: the same Stremio hostname the TV uses, so HTTPS just works."""
+    try:
+        domain = json.loads(Path(CONFIG['cert_file']).read_text())['domain']
+    except (OSError, ValueError, KeyError):
+        return None
+    lan = next((ip for ip in sorted(own_ips()) if re.fullmatch(r'(192\.168|10|172\.(1[6-9]|2\d|3[01]))\.[\d.]+', ip)), None)
+    if not lan:
+        return None
+    return f'https://{lan.replace(".", "-")}.{domain.split(".", 1)[1]}:{CONFIG["https_port"]}/ui'
 
 
 def write_atomic(path, data):
@@ -345,6 +388,10 @@ class Torrent:
         self.error = None         # set by file/torrent error alerts; readers fail fast while it is
         self.mp4_patches = {}     # file index -> [(file offset, 4 replacement bytes)]
         self.mp4_lock = threading.Lock()
+        # For the dashboard, the TV's requests only: where it is reading each file, and how its requests went.
+        self.positions = {}       # file index -> (byte offset, time)
+        self.open_requests = collections.Counter()   # file index -> requests being served right now
+        self.requests = collections.deque(maxlen=80)
         self.lock = threading.RLock()
         self.touch()
         if handle.status().has_metadata:
@@ -571,6 +618,30 @@ class Torrent:
                 self.cond.wait(min(1.0, left))
         return True
 
+    def snapshot(self, idx):
+        """One file as the dashboard needs it (see dashboard.summarize_session)."""
+        fs, plen = layout(self.ti), self.ti.piece_length()
+        size, offset = fs.file_size(idx), fs.file_offset(idx)
+        first, last = offset // plen, (offset + max(size, 1) - 1) // plen
+        s = self.handle.status(lt.status_flags_t.query_pieces)
+        try:
+            peers = self.handle.get_peer_info()
+            sending = sum(1 for p in peers if not p.flags & lt.peer_info.remote_choked)
+            seeds = sum(1 for p in peers if p.flags & lt.peer_info.seed)
+        except Exception:
+            peers, sending, seeds = [], 0, 0
+        pos, at = self.positions.get(idx, (0, self.last_used))
+        patches = self.mp4_patches.get(idx)
+        return {
+            'ih': self.ih, 'idx': idx, 'torrent': self.ti.name(), 'file': fs.file_name(idx), 'size': size,
+            'piece_len': plen, 'file_offset': offset, 'first_piece': first, 'pos_byte': pos, 'pos_at': at,
+            'have': list(s.pieces[first:last + 1]), 'download_bps': s.download_payload_rate,
+            'peers': {'connected': len(peers), 'sending': sending, 'seeds': seeds},
+            'mp4_hidden': None if patches is None else len(patches),
+            'live': self.open_requests[idx] > 0 or time.time() - at < 20,
+            'requests': [r for r in list(self.requests) if r['idx'] == idx],
+        }
+
     def debug(self):
         """Where readers are, and what libtorrent is fetching right now."""
         q = self.handle.get_download_queue()
@@ -721,6 +792,19 @@ class Engine:
 
     def find(self, ih):
         return self.torrents.get(ih.lower())
+
+    def dashboard_sessions(self):
+        """Snapshots of every file the TV has read in a torrent still in the session."""
+        out = []
+        for t in list(self.torrents.values()):
+            if t.ti is None or t.dropping:
+                continue
+            for idx in list(t.positions):
+                try:
+                    out.append(t.snapshot(idx))
+                except Exception as e:
+                    log(f'dashboard: snapshot of {t.ih[:8]}/{idx} failed: {e}')
+        return out
 
     def drop(self, t, reason, only_if_idle=False):
         with self.lock:
@@ -899,13 +983,16 @@ class Handler(BaseHTTPRequestHandler):
     timeout = 300
     engine = None   # set at startup
     prober = None   # set at startup when ffprobe is available
+    dashboard = None
+    tv_ip = None    # the last device that polled us like a Stremio client does
 
     def log_message(self, fmt, *args):
         pass
 
     def log_request(self, code='-', size='-'):
-        # Every request from another device (the TV), so a client problem shows up in torrent.log.
-        if not self.client_address[0].startswith(('127.', '::1')):
+        # Every request from another device (the TV), so a client problem shows up in torrent.log. The
+        # dashboard's own polling (from a phone) would drown it out.
+        if not self.client_address[0].startswith(('127.', '::1')) and not self.path.startswith('/ui/api/'):
             log(f'{self.client_address[0]} {self.command} {self.path[:160]} -> {code}')
 
     def end_headers(self):
@@ -922,6 +1009,10 @@ class Handler(BaseHTTPRequestHandler):
         path, q = u.path, urllib.parse.parse_qs(u.query)
         self.t0, self.sent, self.headers_sent = time.time(), 0, False
         try:
+            if path in ('/ui', '/ui/', '/ui/api/state'):
+                return self.ui(path)
+            if (path.endswith('/stats.json') or path in REMEMBERED) and self.client_address[0] not in own_ips():
+                Handler.tv_ip = self.client_address[0]
             if path == '/torrentd/health':
                 return self.json(self.engine.health())
             m = re.fullmatch(rf'/torrentd/debug/({IH})', path)
@@ -1022,6 +1113,39 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header('Content-Length', str(len(body)))
         self.send_header('Cache-Control', 'no-store')
         self.cors()
+        self.end_headers()
+        if self.command != 'HEAD':
+            self.wfile.write(body)
+
+    # ---- dashboard
+
+    def ui(self, path):
+        local = self.client_address[0].startswith(('127.', '::1'))
+        if not (local or CONFIG['dashboard_lan']):
+            body = ('<!doctype html><meta charset="utf-8"><title>Dashboard</title><p>The dashboard only opens on the Mac '
+                    'running the server. To open it from other devices on your network, add <code>"dashboard_lan": true'
+                    '</code> to ~/.stremio-local-addon/torrentd.json and restart the torrent server.').encode()
+            return self.send_bytes(403, 'text/html; charset=utf-8', body)
+        if path == '/ui/api/state':
+            if not self.dashboard:
+                return self.json({'error': 'dashboard not running'}, 503)
+            return self.json(self.dashboard.state())
+        try:
+            page = DASHBOARD_PAGE.read_bytes()
+        except OSError:
+            return self.send_bytes(404, 'text/plain', b'dashboard.html is missing - reinstall')
+        return self.send_bytes(200, 'text/html; charset=utf-8', page, {
+            'Content-Security-Policy': "default-src 'self'; img-src 'self' https://images.metahub.space; "
+                                       "style-src 'unsafe-inline'; script-src 'unsafe-inline'; frame-ancestors 'none'",
+            'Referrer-Policy': 'no-referrer'})
+
+    def send_bytes(self, status, ctype, body, headers=None):
+        self.send_response(status)
+        self.send_header('Content-Type', ctype)
+        self.send_header('Content-Length', str(len(body)))
+        self.send_header('Cache-Control', 'no-store')
+        for k, v in (headers or {}).items():
+            self.send_header(k, v)
         self.end_headers()
         if self.command != 'HEAD':
             self.wfile.write(body)
@@ -1144,17 +1268,31 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         if self.command == 'HEAD':
             return
-        ok = self.send_range(t, idx, start, end, t.patches_for(idx, f['name'], size))
+        player = self.client_address[0] not in own_ips()      # the TV, not ffprobe or Stremio desktop
+        index_read = size > 256 * MB and start > size - 64 * MB   # the player reading the file's index, not playing
+        if player:
+            t.open_requests[idx] += 1
+            if not index_read or idx not in t.positions:
+                t.positions[idx] = (0 if index_read else start, time.time())
+        try:
+            ok = self.send_range(t, idx, start, end, t.patches_for(idx, f['name'], size), track=player and not index_read)
+        finally:
+            if player:
+                t.open_requests[idx] -= 1
         took = time.time() - self.t0
         tm = getattr(self, 'timing', {})
+        if player:
+            t.requests.append({'at': round(self.t0, 2), 'idx': idx, 'start': start, 'sent': self.sent, 'took': round(took, 2),
+                               'wait': round(tm.get('wait', 0), 2), 'write': round(tm.get('write', 0), 2), 'ok': ok})
         log(f'{self.command} {ih[:8]}/{idx} {rng or "full"} -> {human(self.sent)} in {took:.1f}s'
             + (f' (waiting for pieces {tm["wait"]:.1f}s, reading {tm["read"]:.1f}s, sending {tm["write"]:.1f}s)' if tm else '')
             + ('' if ok else ' (ended early)'))
         if not ok:
             self.close_connection = True
 
-    def send_range(self, t, idx, start, end, patches=()):
-        """Write file bytes [start, end] as their pieces arrive. False if the reader stopped early."""
+    def send_range(self, t, idx, start, end, patches=(), track=False):
+        """Write file bytes [start, end] as their pieces arrive. False if the reader stopped early. With
+        `track`, the position is kept for the dashboard as the bytes go out."""
         fs = layout(t.ti)
         plen = t.ti.piece_length()
         foff = fs.file_offset(idx)
@@ -1194,6 +1332,8 @@ class Handler(BaseHTTPRequestHandler):
                 timing['write'] += time.time() - t2
                 pos += b - a
                 self.sent += b - a
+                if track:
+                    t.positions[idx] = (pos, time.time())
             return True
         except OSError:
             return False   # the player closed the connection — normal on every seek
@@ -1362,6 +1502,11 @@ def main():
                                 runner=ffprobe_runner(CONFIG['ffprobe']))
     else:
         log(f'stream facts off — no ffprobe at {CONFIG["ffprobe"]}')
+    Handler.dashboard = Dashboard(
+        sessions=engine.dashboard_sessions,
+        facts=lambda key: Handler.prober.store.get(key) if Handler.prober else None,
+        config=CONFIG, install_dir=INSTALL_DIR, log=log, phone_url=phone_url,
+        tv_ip=lambda: Handler.tv_ip or last_tv_ip(_tail_log(), own_ips()))
     servers = []
     plain = PlainServer(('0.0.0.0', CONFIG['http_port']), Handler)
     servers.append(plain)

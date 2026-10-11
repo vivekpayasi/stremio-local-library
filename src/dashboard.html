@@ -1,0 +1,407 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark light">
+<meta name="theme-color" content="#0F1B2D" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#EEF2F8" media="(prefers-color-scheme: light)">
+<title>Stream dashboard</title>
+<style>
+:root {
+  --bg: #0F1B2D; --raise: #16243A; --rule: #24375A; --track: #22344F;
+  --ink: #EAF0F8; --ink-2: #B4C2D6; --muted: #8193AD;
+  --have: #6A8FE8; --ahead: #129680;
+  --good: #4CC38A; --warn: #F2B53A; --bad: #FF6B6B;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --figures: ui-rounded, "SF Pro Rounded", system-ui, -apple-system, Roboto, sans-serif;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #EEF2F8; --raise: #FFFFFF; --rule: #D3DCE9; --track: #E3E9F2;
+    --ink: #0F1B2D; --ink-2: #33445E; --muted: #5A6B85;
+    --have: #3D6CC7; --ahead: #0E9682;
+    --good: #1E8E5A; --warn: #A86A00; --bad: #C93C3C;
+  }
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--ink); font: 16px/1.5 var(--sans);
+  padding: max(12px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right))
+           max(24px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+}
+main, .status { max-width: 1180px; margin: 0 auto; }
+h1, h2, p, dl, dd, ol, ul, figure { margin: 0; }
+:focus-visible { outline: 2px solid var(--have); outline-offset: 3px; border-radius: 4px; }
+
+/* the one sentence on how things are going */
+.status { display: flex; align-items: baseline; gap: 10px; padding: 6px 0 14px; }
+.status p { font-size: 17px; font-weight: 600; line-height: 1.35; }
+.mark { flex: none; width: 1.1em; text-align: center; font-size: 15px; }
+.lv-good { color: var(--good); } .lv-warn { color: var(--warn); } .lv-bad { color: var(--bad); } .lv-idle { color: var(--muted); }
+.fresh { margin-left: auto; flex: none; font-size: 13px; color: var(--muted); }
+
+/* now playing — the raised panel */
+.now { background: var(--raise); border-radius: 18px; padding: 18px 16px 16px; }
+.np { display: grid; grid-template-columns: 64px 1fr; gap: 14px; align-items: start; }
+.poster { width: 64px; aspect-ratio: 2 / 3; border-radius: 8px; object-fit: cover; background: var(--track); display: block; }
+.poster.ph { display: grid; place-items: center; font: 700 26px var(--figures); color: var(--muted); }
+.np h1 { font-size: 26px; line-height: 1.15; font-weight: 700; letter-spacing: -0.01em; overflow-wrap: anywhere; }
+.np .sub { color: var(--ink-2); font-size: 15px; margin-top: 2px; }
+.np .file { color: var(--muted); font-size: 13px; margin-top: 6px; overflow-wrap: anywhere; }
+.np .file span + span::before { content: ""; display: inline-block; width: 12px; }
+
+.strip { margin: 20px 0 6px; position: relative; padding-top: 22px; }
+.strip svg { display: block; width: 100%; height: 30px; }
+.head-label { position: absolute; top: 0; transform: translateX(-50%); font: 600 13px var(--figures);
+  font-variant-numeric: tabular-nums; color: var(--ink); white-space: nowrap; }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 13px; color: var(--ink-2); margin-top: 8px; }
+.legend i { display: inline-block; width: 12px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
+.legend i.line { width: 2px; height: 12px; border-radius: 0; background: var(--ink); margin: 0 8px 0 4px; vertical-align: -2px; }
+.axis { display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); margin-top: 4px; font-variant-numeric: tabular-nums; }
+
+.figures { display: grid; grid-template-columns: 1fr 1fr; gap: 14px 18px; margin-top: 18px; }
+.fig .label { font-size: 13px; color: var(--ink-2); }
+.fig .value { font: 600 26px/1.15 var(--figures); font-variant-numeric: tabular-nums; }
+.fig .note { font-size: 13px; color: var(--muted); }
+.fig.hero { grid-column: 1 / -1; }
+.fig.hero .value { font-size: 52px; letter-spacing: -0.02em; }
+
+.spark { margin-top: 16px; position: relative; }
+.spark .label { font-size: 13px; color: var(--ink-2); margin-bottom: 4px; }
+.spark svg { display: block; width: 100%; height: 64px; touch-action: none; }
+.tip { position: absolute; pointer-events: none; background: var(--bg); color: var(--ink); border: 1px solid var(--rule);
+  border-radius: 6px; padding: 2px 8px; font: 600 13px var(--figures); font-variant-numeric: tabular-nums;
+  white-space: nowrap; transform: translate(-50%, -110%); }
+
+.chips { list-style: none; padding: 0; display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; }
+.chips li { border: 1px solid var(--rule); border-radius: 999px; padding: 3px 11px; font-size: 13px; color: var(--ink-2); }
+.chips li.proof { border-color: transparent; background: var(--track); color: var(--ink); }
+.fix { margin-top: 12px; font-size: 14px; color: var(--ink-2); }
+
+.events { list-style: none; padding: 0; margin-top: 16px; border-top: 1px solid var(--rule); }
+.events li { display: grid; grid-template-columns: 1.4em 1fr auto; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--rule); font-size: 14px; }
+.events .why { display: block; color: var(--muted); font-size: 13px; }
+.events time { color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+
+.empty h1 { font-size: 24px; font-weight: 700; }
+.empty p { color: var(--ink-2); margin-top: 6px; max-width: 60ch; }
+.empty .sub { margin-top: 16px; font-size: 13px; color: var(--muted); }
+.earlier { list-style: none; padding: 0; margin-top: 4px; }
+.earlier li { padding: 8px 0; border-top: 1px solid var(--rule); font-size: 14px; display: flex; gap: 12px; justify-content: space-between; }
+.earlier li span:last-child { color: var(--muted); white-space: nowrap; }
+
+/* the quieter sections */
+.grid { display: grid; grid-template-columns: 1fr; gap: 0 32px; margin-top: 8px; }
+.sec { border-top: 1px solid var(--rule); padding: 16px 0 18px; min-width: 0; }
+.sec h2 { font-size: 16px; font-weight: 650; margin-bottom: 8px; }
+.sec .lead { font-size: 14px; color: var(--ink-2); margin-bottom: 8px; }
+dl.kv { display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; font-size: 14px; }
+dl.kv dt { color: var(--ink-2); }
+dl.kv dd { text-align: right; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+dl.kv dd .q { color: var(--muted); }
+.meter { height: 8px; border-radius: 4px; background: var(--track); overflow: hidden; margin: 2px 0 2px auto; max-width: 180px; }
+.meter b { display: block; height: 100%; background: var(--have); border-radius: 4px; }
+.alert { margin-top: 10px; font-size: 13px; color: var(--ink-2); border-left: 3px solid var(--bad); padding: 4px 0 4px 10px; overflow-wrap: anywhere; }
+.alert.warn { border-color: var(--warn); }
+.copy { font: inherit; font-size: 13px; color: var(--ink); background: var(--track); border: 0; border-radius: 6px;
+  padding: 6px 10px; min-height: 36px; cursor: pointer; text-align: left; overflow-wrap: anywhere; width: 100%; }
+
+details.log { border-top: 1px solid var(--rule); padding: 14px 0; }
+details.log summary { font-weight: 650; cursor: pointer; min-height: 32px; }
+.log ol { list-style: none; padding: 0; margin-top: 8px; font: 12px/1.55 var(--mono); color: var(--ink-2); }
+.log li { display: grid; grid-template-columns: 5.5em 1fr; gap: 8px; overflow-wrap: anywhere; }
+.log time { color: var(--muted); }
+
+@media (min-width: 760px) {
+  .now { padding: 24px; }
+  .np { grid-template-columns: 96px 1fr; gap: 20px; }
+  .poster { width: 96px; }
+  .np h1 { font-size: 32px; }
+  .figures { grid-template-columns: 1.4fr 1fr 1fr; align-items: end; }
+  .fig.hero { grid-column: auto; }
+  .grid { grid-template-columns: 1fr 1fr; }
+}
+@media (min-width: 1440px) { .grid { grid-template-columns: repeat(4, 1fr); } }
+@media (prefers-reduced-motion: no-preference) { .strip rect.ahead, .meter b { transition: width .6s ease, x .6s ease; } }
+</style>
+</head>
+<body>
+<header class="status" aria-live="polite">
+  <span class="mark lv-idle" id="mark" aria-hidden="true">○</span>
+  <p id="health">Connecting to the torrent server…</p>
+  <span class="fresh" id="fresh"></span>
+</header>
+<main>
+  <section class="now" id="now" aria-label="Now playing"></section>
+  <div class="grid">
+    <section class="sec" id="tv" aria-labelledby="tv-h"></section>
+    <section class="sec" id="network" aria-labelledby="net-h"></section>
+    <section class="sec" id="mac" aria-labelledby="mac-h"></section>
+    <section class="sec" id="library" aria-labelledby="lib-h"></section>
+  </div>
+  <details class="log" id="log"><summary>Server log</summary><ol id="loglines"></ol></details>
+</main>
+<script>
+'use strict';
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const MB = 1024 * 1024;
+const nf = new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 });
+const MARK = { good: '●', warn: '▲', bad: '■', idle: '○' };
+
+function clock(s) {
+  s = Math.max(0, Math.round(s));
+  const h = Math.floor(s / 3600), m = Math.floor(s / 60) % 60, sec = String(s % 60).padStart(2, '0');
+  return h ? `${h}:${String(m).padStart(2, '0')}:${sec}` : `${m}:${sec}`;
+}
+const bytes = (b) => b == null ? '—' : b >= 1024 * MB ? `${nf.format(b / 1024 / MB)} GB` : `${Math.round(b / MB)} MB`;
+const span = (s) => s < 60 ? `${Math.round(s)} s` : s < 3600 ? `${Math.round(s / 60)} min`
+  : s < 86400 ? `${Math.floor(s / 3600)} h ${Math.round(s / 60) % 60} min` : `${nf.format(s / 86400)} days`;
+const ago = (s) => s == null ? '' : s < 10 ? 'just now' : s < 60 ? `${Math.round(s)} s ago` : s < 3600 ? `${Math.round(s / 60)} min ago` : `${nf.format(s / 3600)} h ago`;
+const lv = (level, text) => `<span class="lv-${level}" aria-hidden="true">${MARK[level]}</span> ${esc(text)}`;
+const signal = (dbm) => dbm == null ? '' : dbm >= -55 ? lv('good', 'excellent') : dbm >= -67 ? lv('good', 'good') : dbm >= -75 ? lv('warn', 'fair') : lv('bad', 'weak');
+const row = (k, v) => v == null || v === '' ? '' : `<dt>${esc(k)}</dt><dd>${v}</dd>`;
+
+// ------------------------------------------------------------------ now playing
+
+function strip(s) {
+  const W = 1000, H = 30, n = s.strip.length;
+  let rects = `<rect x="0" y="0" width="${W}" height="${H}" rx="4" fill="var(--track)"/>`;
+  // Runs of downloaded pieces; a partly downloaded bucket is drawn lighter.
+  for (let i = 0; i < n;) {
+    const f = s.strip[i];
+    if (!f) { i++; continue; }
+    let j = i;
+    while (j + 1 < n && Math.abs(s.strip[j + 1] - f) < 0.05) j++;
+    const op = f >= 0.95 ? 1 : 0.35 + 0.6 * f;
+    rects += `<rect x="${(i / n * W).toFixed(1)}" y="0" width="${((j - i + 1) / n * W).toFixed(1)}" height="${H}" fill="var(--have)" fill-opacity="${op}"/>`;
+    i = j + 1;
+  }
+  const x0 = s.position * W, x1 = Math.max(x0, s.ahead_end * W);
+  if (x1 - x0 > 0.5) rects += `<rect class="ahead" x="${x0.toFixed(1)}" y="0" width="${(x1 - x0).toFixed(1)}" height="${H}" fill="var(--ahead)"/>`;
+  for (const e of s.events || []) {
+    if (e.kind === 'seek' && e.pos != null) rects += `<rect x="${(e.pos * W - 1).toFixed(1)}" y="${H - 6}" width="2" height="6" fill="var(--ink-2)"/>`;
+  }
+  rects += `<rect x="${Math.max(0, x0 - 1.5).toFixed(1)}" y="0" width="3" height="${H}" fill="var(--ink)"/>`;
+  const at = s.position_s != null ? clock(s.position_s) : `${Math.round(s.position * 100)}%`;
+  const label = `Downloaded parts of the file; playing at ${at}${s.ahead_s != null ? `, ${clock(s.ahead_s)} buffered ahead` : ''}`;
+  const left = Math.min(96, Math.max(4, s.position * 100));
+  return `<figure class="strip">
+    <span class="head-label" style="left:${left}%">${esc(at)}</span>
+    <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="${esc(label)}">${rects}</svg>
+    <div class="axis"><span>${s.duration_s ? '0:00' : 'Start'}</span><span>${s.duration_s ? clock(s.duration_s) : 'End'}</span></div>
+    <figcaption class="legend">
+      <span><i style="background:var(--have)"></i>Downloaded</span>
+      <span><i style="background:var(--ahead)"></i>Buffered ahead</span>
+      <span><i class="line"></i>Playing</span>
+    </figcaption></figure>`;
+}
+
+function spark(s) {
+  const pts = (s.history || []).map((h) => ({ t: h[0], v: s.ahead_s != null ? h[1] : h[3] })).filter((p) => p.v != null);
+  if (pts.length < 3) return '';
+  const unit = s.ahead_s != null ? 's' : 'MB';
+  const W = 600, H = 64, t0 = pts[0].t, t1 = pts[pts.length - 1].t, max = Math.max(...pts.map((p) => p.v), 1);
+  const x = (t) => (t1 > t0 ? (t - t0) / (t1 - t0) : 1) * W, y = (v) => H - 2 - v / max * (H - 6);
+  const line = pts.map((p, i) => `${i ? 'L' : 'M'}${x(p.t).toFixed(1)},${y(p.v).toFixed(1)}`).join('');
+  const mins = Math.max(1, Math.round((t1 - t0) / 60));
+  sparkData = { pts, x, y, W, unit };
+  return `<div class="spark"><p class="label">Buffered ahead, last ${mins} min</p>
+    <svg id="sparksvg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="Buffered ahead over the last ${mins} minutes, now ${unit === 's' ? clock(pts[pts.length - 1].v) : `${Math.round(pts[pts.length - 1].v)} MB`}">
+      <line x1="0" x2="${W}" y1="${H - 1}" y2="${H - 1}" stroke="var(--rule)" stroke-width="1" vector-effect="non-scaling-stroke"/>
+      <path d="${line}L${W},${H}L0,${H}Z" fill="var(--ahead)" fill-opacity="0.1"/>
+      <path d="${line}" fill="none" stroke="var(--ahead)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/>
+      <line id="cross" x1="0" x2="0" y1="0" y2="${H}" stroke="var(--ink-2)" stroke-width="1" vector-effect="non-scaling-stroke" visibility="hidden"/>
+    </svg><span class="tip" id="tip" hidden></span></div>`;
+}
+let sparkData = null;
+
+function hookSpark() {
+  const svg = $('sparksvg'), tip = $('tip'), cross = $('cross');
+  if (!svg || !sparkData) return;
+  const move = (ev) => {
+    const r = svg.getBoundingClientRect(), d = sparkData;
+    const fx = ((ev.touches ? ev.touches[0].clientX : ev.clientX) - r.left) / r.width * d.W;
+    let best = d.pts[0];
+    for (const p of d.pts) if (Math.abs(d.x(p.t) - fx) < Math.abs(d.x(best.t) - fx)) best = p;
+    const bx = d.x(best.t);
+    cross.setAttribute('x1', bx); cross.setAttribute('x2', bx); cross.setAttribute('visibility', 'visible');
+    tip.hidden = false;
+    tip.textContent = `${d.unit === 's' ? clock(best.v) : `${Math.round(best.v)} MB`} · ${ago(Date.now() / 1000 - best.t)}`;
+    tip.style.left = `${bx / d.W * r.width}px`;
+    tip.style.top = `${d.y(best.v) / 64 * r.height + 22}px`;
+  };
+  const leave = () => { tip.hidden = true; cross.setAttribute('visibility', 'hidden'); };
+  svg.addEventListener('pointermove', move); svg.addEventListener('pointerdown', move); svg.addEventListener('pointerleave', leave);
+}
+
+const EVENT_MARK = { seek: '↷', stall: '⏸', reread: '↺' };
+const CAUSE = { swarm: 'The torrent sent pieces too slowly', player: 'The player or the file\'s layout' };
+
+function poster(s) {
+  return s.poster ? `<img class="poster" src="${esc(s.poster)}" alt="" loading="lazy" referrerpolicy="no-referrer">`
+    : `<div class="poster ph" aria-hidden="true">${esc((s.title || '?').trim()[0] || '?')}</div>`;
+}
+
+function nowPlaying(state) {
+  const sessions = state.sessions || [];
+  const s = sessions.find((x) => x.live);
+  const earlier = sessions.filter((x) => !x.live);
+  if (!s) {
+    $('now').className = 'now empty';
+    $('now').innerHTML = `<h1>Start something on the TV</h1>
+      <p>It shows up here within a couple of seconds, with how much is buffered and, if it stalls, why.</p>
+      ${earlier.length ? '<p class="sub">Played earlier</p>' : ''}
+      ${earlier.length ? `<ul class="earlier">${earlier.map((e) => `<li><span>${esc(e.title)}${e.subtitle ? `, ${esc(e.subtitle.toLowerCase())}` : ''}</span><span>${ago(e.ended_ago_s)}</span></li>`).join('')}</ul>` : ''}`;
+    sparkData = null;
+    return;
+  }
+  $('now').className = 'now';
+  const need = s.bitrate_mbps;
+  const ahead = s.ahead_s != null ? clock(s.ahead_s) : bytes(s.ahead_bytes);
+  $('now').innerHTML = `
+    <div class="np">${poster(s)}
+      <div><h1>${esc(s.title)}</h1>${s.subtitle ? `<p class="sub">${esc(s.subtitle)}</p>` : ''}
+        <p class="file"><span>${esc(s.file)}</span><span>${bytes(s.size)}</span></p></div></div>
+    ${strip(s)}
+    <div class="figures">
+      <div class="fig hero"><div class="label">Buffered ahead</div><div class="value">${esc(ahead)}</div>
+        <div class="note">${s.ahead_s != null ? bytes(s.ahead_bytes) + ' ready on this Mac' : 'Bitrate not known yet'}</div></div>
+      <div class="fig"><div class="label">Download</div><div class="value">${nf.format(s.download_mbps)} Mbps</div>
+        <div class="note">${need ? `${need < s.download_mbps ? lv('good', '') : lv('warn', '')}file needs ${nf.format(need)}` : 'file bitrate not known yet'}</div></div>
+      <div class="fig"><div class="label">Peers</div><div class="value">${s.peers.connected}</div>
+        <div class="note">${s.peers.sending} sending, ${s.peers.seeds} seeds</div></div>
+    </div>
+    ${spark(s)}
+    <ul class="chips" aria-label="What the file contains">${s.chips.map((c) => `<li>${esc(c)}</li>`).join('')}
+      <li class="proof">${s.verified ? 'Read from the file itself' : 'Guessed from the file name'}</li></ul>
+    ${s.mp4_fix ? `<p class="fix">${esc(s.mp4_fix)}.</p>` : ''}
+    ${s.events.length ? `<ol class="events" aria-label="Recent seeks and stalls">${s.events.map((e) => `
+      <li><span aria-hidden="true">${EVENT_MARK[e.kind] || '•'}</span>
+        <span>${esc(e.text)}${e.cause ? `<span class="why">${esc(CAUSE[e.cause] || e.cause)}</span>` : ''}</span>
+        <time>${ago(state.now - e.at)}</time></li>`).join('')}</ol>` : ''}`;
+  hookSpark();
+}
+
+// ------------------------------------------------------------------ the quieter sections
+
+function tvSection(tv, net) {
+  const h = '<h2 id="tv-h">TV</h2>';
+  if (!tv) return `${h}<p class="lead">Waiting for the first reading.</p>`;
+  const why = {
+    unreachable: 'The TV isn\'t answering. It may be off or asleep.',
+    unauthorized: 'Accept "Allow debugging?" on the TV to see its details here.',
+    'no-adb': 'Turn on USB debugging on the TV (Developer options) to see its details here.',
+    off: tv.why === 'adb is not installed' ? 'Install adb on this Mac to see the TV\'s details: brew install --cask android-platform-tools'
+      : 'The TV shows up here once it has played something through this server.',
+  }[tv.state];
+  if (tv.state !== 'ok') return `${h}<p class="lead">${esc(why || 'No details yet.')}</p>`;
+  const w = tv.wifi || {}, m = tv.memory || {}, p = tv.player || {}, st = tv.stremio;
+  const low = m.available_mb != null && m.available_mb < 400;
+  return `${h}<dl class="kv">
+    ${row('Model', esc(`${tv.model || ''}${tv.android ? `, Android ${tv.android}` : ''}`))}
+    ${row('Player', esc(p.name || 'not playing'))}
+    ${row('Video decoder', p.video_decoder ? esc(p.video_decoder.replace(/^(OMX|c2)\.[a-z]+\./i, '').replace(/\.decoder.*$/, '')) : null)}
+    ${row('Audio', p.dts_on_tv ? 'DTS decoded by the TV' : null)}
+    ${row('Wi-Fi', w.rssi != null ? `${esc(w.band || '')} ${w.rssi} dBm <span class="q">${signal(w.rssi)}</span>` : null)}
+    ${row('Link speed', w.link ? `${w.link} Mbps` : null)}
+    ${row('Free memory', m.available_mb != null ? `${low ? lv('warn', '') : ''}${m.available_mb} of ${m.total_mb} MB` : null)}
+    ${row('Stremio', st ? `${nf.format(st.cpu)}% CPU, ${esc(st.memory)}` : null)}
+  </dl>
+  ${p.error ? `<p class="alert">Last player error${p.error_at ? ` at ${esc(p.error_at)}` : ''}: ${esc(p.error)}</p>` : ''}
+  ${p.name === 'mpv' ? '<p class="alert warn">This title plays in mpv. Stremio remembers a player per title; ExoPlayer is the one that handles Dolby Vision on Android TVs.</p>' : ''}
+  ${p.low_memory_kills ? `<p class="alert warn">Android closed ${p.low_memory_kills} app${p.low_memory_kills > 1 ? 's' : ''} recently to free memory.</p>` : ''}`;
+}
+
+function networkSection(n) {
+  const w = n.mac_wifi, p = n.tv_ping;
+  const ping = !p ? null : p.ms == null ? lv('bad', 'no answer')
+    : `${nf.format(p.ms)} ms <span class="q">${p.ms < 10 ? lv('good', 'good') : p.ms < 50 ? lv('warn', 'slow') : lv('bad', 'very slow')}</span>`;
+  return `<h2 id="net-h">Network</h2><dl class="kv">
+    ${row('Mac Wi-Fi', w ? `${esc(w.band || '')}${w.channel ? `, channel ${w.channel}` : ''}` : 'not on Wi-Fi')}
+    ${row('Mac signal', w && w.rssi != null ? `${w.rssi} dBm <span class="q">${signal(w.rssi)}</span>` : null)}
+    ${row('Mac link speed', w && w.rate ? `${w.rate} Mbps` : null)}
+    ${row('Ping to the TV', ping)}
+    ${row('TV address', n.tv_ip ? esc(n.tv_ip) : null)}
+  </dl>${p && p.ms != null && p.ms >= 50 ? '<p class="alert warn">The TV is slow to answer. Restarting the TV usually clears a stuck Wi-Fi connection.</p>' : ''}`;
+}
+
+function macSection(srv, phone) {
+  const c = srv.cache;
+  const pct = c ? Math.min(100, c.used / c.budget * 100) : 0;
+  return `<h2 id="mac-h">This Mac</h2><dl class="kv">
+    ${row('Torrent server', srv.cpu != null ? `${nf.format(srv.cpu)}% CPU, ${srv.rss_mb} MB` : null)}
+    ${row('Running for', span(srv.uptime_s))}
+    ${row('Download limit', srv.download_cap_mbps ? `${srv.download_cap_mbps} Mbps` : 'none')}
+    ${row('Torrent cache', c ? `${bytes(c.used)} of ${bytes(c.budget)}<div class="meter" role="img" aria-label="${Math.round(pct)}% of the cache budget used"><b style="width:${pct.toFixed(1)}%"></b></div>` : null)}
+    ${row('Free disk', c ? bytes(c.free) : null)}
+    ${row('Learning from plays', srv.learning ? 'on' : 'off')}
+  </dl>${phone ? `<p class="lead" style="margin-top:12px">Open on your phone</p><button class="copy" type="button" data-copy="${esc(phone)}">${esc(phone)}</button>` : ''}`;
+}
+
+function librarySection(lib) {
+  if (!lib) return '<h2 id="lib-h">Library</h2><p class="lead">The Local Library addon isn\'t answering.</p>';
+  const a = lib.advisor;
+  return `<h2 id="lib-h">Library</h2><dl class="kv">
+    ${row('Movies on this Mac', lib.movies)}
+    ${row('Shows', lib.shows)}
+    ${row('Other videos', lib.other)}
+    ${row('Stream ratings', a ? `from ${esc((a.upstreams || []).join(', ') || 'no addon')}` : 'off')}
+    ${row('Files checked', a ? a.facts : null)}
+  </dl>${a ? `<p class="lead" style="margin-top:10px">Rated for ${esc(a.profile)}</p>` : ''}
+  ${lib.account ? `<p class="lead">${lv(lib.account.ok ? 'good' : 'warn', lib.account.text)}</p>` : ''}`;
+}
+
+function logSection(lines) {
+  $('loglines').innerHTML = lines.slice().reverse().map((l) => `<li><time>${esc(l.time)}</time><span>${esc(l.text)}</span></li>`).join('');
+}
+
+// ------------------------------------------------------------------ polling
+
+let lastOk = 0, timer = null;
+
+function render(state) {
+  const h = state.health;
+  $('mark').className = `mark lv-${h.level}`;
+  $('mark').textContent = MARK[h.level];
+  $('health').textContent = h.text;
+  nowPlaying(state);
+  $('tv').innerHTML = tvSection(state.tv, state.network);
+  $('network').innerHTML = networkSection(state.network);
+  $('mac').innerHTML = macSection(state.server, state.phone_url);
+  $('library').innerHTML = librarySection(state.library);
+  logSection(state.log || []);
+}
+
+async function poll() {
+  clearTimeout(timer);
+  try {
+    const r = await fetch('/ui/api/state', { cache: 'no-store' });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    render(await r.json());
+    lastOk = Date.now();
+    $('fresh').textContent = '';
+  } catch (e) {
+    $('mark').className = 'mark lv-bad';
+    $('mark').textContent = MARK.bad;
+    $('health').textContent = 'Can\'t reach the torrent server';
+    $('fresh').textContent = lastOk ? `last update ${ago((Date.now() - lastOk) / 1000)}` : '';
+  }
+  if (!document.hidden) timer = setTimeout(poll, 2000);
+}
+
+document.addEventListener('visibilitychange', () => { if (!document.hidden) poll(); });
+document.addEventListener('click', async (ev) => {
+  const b = ev.target.closest('[data-copy]');
+  if (!b) return;
+  try { await navigator.clipboard.writeText(b.dataset.copy); b.textContent = 'Copied'; } catch { /* not allowed over plain HTTP */ }
+  setTimeout(() => { b.textContent = b.dataset.copy; }, 1500);
+});
+if (matchMedia('(min-width: 760px)').matches) $('log').open = true;
+poll();
+</script>
+</body>
+</html>

@@ -190,6 +190,29 @@ Settings in `advisor.json`:
 `https://<host>:12471/advisor/health` shows the profile in use and how many files have verified facts;
 `addon.log` has one line per list rated.
 
+### Dashboard
+
+`http://localhost:11472/ui` shows what the TV is playing and how healthy the stream is, live:
+
+- **Now playing** — title and poster, and a strip of the whole file: what is downloaded, where the TV is
+  playing, how much is buffered ahead of it (in minutes once the file's bitrate is known), and where you
+  seeked. Below it the download speed against what the file needs, the peers, a short history of the buffer,
+  what the file contains (read from the file itself once it has played), whether the MP4 subtitle fix is
+  active, and every stall with its likely cause.
+- **TV** — over ADB, when the TV allows it: which player Stremio is using, the video decoder, Wi-Fi signal,
+  free memory, and the last player error (for example a decoder rejecting Dolby Vision profile 7).
+- **Network** — this Mac's Wi-Fi and a ping to the TV, which is what separates a slow torrent from a slow
+  living-room link.
+- **This Mac** and **Library** — the torrent server's CPU and memory, cache use, the library, the Stream
+  Advisor and the state of your Stremio account. And the server log, without the TV's constant polling.
+
+The status line at the top says in one sentence whether things are fine and, if not, why. The page works
+on a phone: it shows what is being watched, so by default only this Mac can open it. To open it from other
+devices on your network, add `"dashboard_lan": true` to `~/.stremio-local-addon/torrentd.json` and restart
+the torrent server; the menu bar then offers the address to copy —
+`https://<your-dashed-ip>.<your-hash>.stremio.rocks:12472/ui`, the same host the TV uses. Nothing is collected
+while nobody has the page open.
+
 ### Menu bar icon
 
 The installer offers to add a status icon to the menu bar. It is a small

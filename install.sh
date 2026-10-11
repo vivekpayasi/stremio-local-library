@@ -143,7 +143,7 @@ bold "Installing"
 
 mkdir -p "$INSTALL_DIR"
 for f in addon.mjs autoheal.mjs auth.mjs advisor.mjs rating.mjs device-profile.default.json make-profile.mjs urls.sh \
-         torrent_server.py stream_facts.py; do
+         torrent_server.py stream_facts.py dashboard.py dashboard.html; do
   cp "$SRC_DIR/src/$f" "$INSTALL_DIR/$f"
 done
 chmod +x "$INSTALL_DIR/urls.sh"
@@ -267,6 +267,7 @@ if [ -n "$SWIFTBAR_APP" ]; then
   echo "  To keep the menu bar icon after a reboot: SwiftBar -> Preferences -> Launch at Login."
 fi
 echo
+echo "  Dashboard: http://localhost:11472/ui  (to open it on a phone, see \"Dashboard\" in the README)"
 echo "  Logs:      tail -f $INSTALL_DIR/addon.log $INSTALL_DIR/torrent.log"
 echo "  Uninstall: $SRC_DIR/uninstall.sh"
 echo

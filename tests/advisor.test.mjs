@@ -40,6 +40,7 @@ function setup({ config, facts = {}, upstream = () => ({ streams: STREAMS }), co
     config: path.join(dir, 'advisor.json'),
     profile: path.join(dir, 'device-profile.json'),
     facts: path.join(dir, 'stream-facts.json'),
+    titles: path.join(dir, 'stream-titles.json'),
   };
   if (config) fs.writeFileSync(files.config, JSON.stringify(config));
   fs.writeFileSync(files.facts, JSON.stringify({ version: 1, facts }));
@@ -48,7 +49,9 @@ function setup({ config, facts = {}, upstream = () => ({ streams: STREAMS }), co
     requests.push({ url: String(url), opts });
     const u = String(url);
     const reply = (status, body) => ({ ok: status === 200, status, json: async () => body });
-    if (u.startsWith('https://v3-cinemeta.strem.io/meta/')) return reply(200, { meta: { runtime: '109 min' } });
+    if (u.startsWith('https://v3-cinemeta.strem.io/meta/')) {
+      return reply(200, { meta: { runtime: '109 min', name: 'Chernobyl', releaseInfo: '2019', poster: 'https://images.metahub.space/poster/medium/tt7366338/img' } });
+    }
     if (u.startsWith('https://torrentio.strem.fun/') && u.includes('/stream/')) {
       const out = upstream(u);
       if (out instanceof Error) throw out;
@@ -228,6 +231,18 @@ test('enabled: false serves no streams and reports itself inactive', async () =>
   const { advisor, cleanup } = setup({ config: { ...CONFIGURED, enabled: false } });
   assert.deepEqual(await advisor.route('/advisor/stream/movie/tt1.json'), { streams: [] });
   assert.equal(advisor.active(), false);
+  cleanup();
+});
+
+test('which title each torrent belongs to is recorded for the dashboard', async () => {
+  const { advisor, files, cleanup } = setup({ config: CONFIGURED });
+  await advisor.route('/advisor/stream/series/tt7366338:1:2.json');
+  const titles = JSON.parse(fs.readFileSync(files.titles, 'utf8'));
+  assert.deepEqual(titles[IH_GOOD], {
+    imdb: 'tt7366338', type: 'series', name: 'Chernobyl', year: '2019', season: 1, episode: 2,
+    poster: 'https://images.metahub.space/poster/medium/tt7366338/img', at: titles[IH_GOOD].at,
+  });
+  assert.equal(typeof titles[IH_GOOD].at, 'number');
   cleanup();
 });
 

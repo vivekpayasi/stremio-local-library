@@ -5,6 +5,7 @@ collection-backups/
 addon-collection-backup.json
 advisor.json
 stream-facts.json
+stream-titles.json
 
 # macOS
 .DS_Store
