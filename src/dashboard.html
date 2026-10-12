@@ -118,7 +118,11 @@ dl.kv dd .q { color: var(--muted); }
 .cache-list .c-title { display: block; }
 .cache-list .inuse { font-size: 13px; color: var(--muted); padding: 0 6px; }
 .c-files { list-style: none; padding: 0; margin: 6px 0 2px; }
-.c-files li { display: block; border: 0; padding: 2px 0; font-size: 13px; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.c-files li { display: grid; grid-template-columns: 1fr auto; gap: 2px 10px; align-items: center; border: 0; padding: 4px 0;
+  font-size: 13px; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.c-files .bar { grid-column: 1; }
+.c-files .f-act { grid-column: 2; grid-row: 1 / span 2; }
+button.del.small { min-height: 36px; padding: 2px 12px; font-size: 13px; }
 .c-files .bar { display: block; height: 4px; border-radius: 2px; background: var(--track); overflow: hidden; margin-top: 3px; max-width: 280px; }
 .c-files .bar b { display: block; height: 100%; background: var(--have); border-radius: 2px; }
 button.del, button.clear { font: inherit; font-size: 14px; min-height: 40px; padding: 6px 14px; border-radius: 8px; cursor: pointer;
@@ -392,17 +396,21 @@ function cacheSection(rows, srv) {
   const now = Date.now() / 1000;
   if (!rows.length) return `${h}<p class="lead">Nothing is stored. Torrents you play are kept here for rewinds and re-watching.</p>`;
   return `${h}<p class="lead">Kept on this Mac for rewinds and re-watching.${budget}</p>
-    <ul class="cache-list">${rows.map((r) => `<li>
+    <ul class="cache-list">${rows.map((r) => { const many = (r.files || []).length > 1; return `<li>
       <div><span class="c-title">${esc(r.title || (r.name === r.ih.slice(0, 8) ? `Unknown torrent ${r.name}` : r.name))}</span>${r.title ? `<span class="c-sub">${esc(r.name)}</span>` : ''}
         ${(r.files || []).length ? `<ul class="c-files">${r.files.map((f) => {
           const pct = Math.floor(f.done * 100);
-          return `<li>${esc(fileLabel(f.name))}: ${pct}% of ${bytes(f.length)}
+          const label = fileLabel(f.name);
+          const act = !many ? '' : f.busy ? '<span class="f-act inuse">Being read</span>'
+            : `<button class="f-act del small" type="button" data-delfile="${esc(r.ih)}" data-idx="${Number(f.idx)}"
+                data-label="${esc(label)}" data-size="${esc(bytes(f.length * f.done))}">Delete</button>`;
+          return `<li><span>${esc(label)}: ${pct}% of ${bytes(f.length)}</span>${act}
             <span class="bar" role="img" aria-label="${pct}% downloaded"><b style="width:${(f.done * 100).toFixed(1)}%"></b></span></li>`;
         }).join('')}</ul>` : ''}
         <span class="c-meta">${r.bytes ? `${bytes(r.bytes)} on disk` : 'Nothing downloaded'}, used ${ago(now - r.last_used)}</span></div>
       ${r.in_use ? '<span class="inuse">In use</span>'
-        : `<button class="del" type="button" data-del="${esc(r.ih)}" data-label="${esc(r.title || r.name)}" data-size="${esc(bytes(r.bytes))}">Delete</button>`}
-    </li>`).join('')}</ul>
+        : `<button class="del" type="button" data-del="${esc(r.ih)}" data-label="${esc((r.title || r.name) + (many ? ', every file' : ''))}" data-size="${esc(bytes(r.bytes))}">${many ? 'Delete all' : 'Delete'}</button>`}
+    </li>`; }).join('')}</ul>
     ${idle.length > 1 ? `<button class="clear" type="button" data-clear="${idle.length}" data-size="${esc(bytes(idleBytes))}">Delete all ${idle.length} not in use (${bytes(idleBytes)})</button>` : ''}
     <p class="cache-msg" aria-live="polite">${esc(cacheMsg)}</p>`;
 }
@@ -468,6 +476,10 @@ document.addEventListener('click', (ev) => {
   const del = ev.target.closest('[data-del]');
   if (del && confirm(`Delete “${del.dataset.label}” (${del.dataset.size})? It downloads again if you play it.`)) {
     change('/ui/api/cache/delete', { ih: del.dataset.del });
+  }
+  const one = ev.target.closest('[data-delfile]');
+  if (one && confirm(`Delete ${one.dataset.label} (${one.dataset.size}) from this Mac? It downloads again if you play it.`)) {
+    change('/ui/api/cache/delete-file', { ih: one.dataset.delfile, idx: Number(one.dataset.idx) });
   }
   const clr = ev.target.closest('[data-clear]');
   if (clr && confirm(`Delete ${clr.dataset.clear} downloaded torrents (${clr.dataset.size})? Anything playing now is kept.`)) {

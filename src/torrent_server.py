@@ -408,7 +408,8 @@ class Torrent:
         self.mp4_lock = threading.Lock()
         # For the dashboard, the TV's requests only: where it is reading each file, and how its requests went.
         self.positions = {}       # file index -> (byte offset, time)
-        self.open_requests = collections.Counter()   # file index -> requests being served right now (under lock)
+        self.open_requests = collections.Counter()   # file index -> the TV's requests being served now (under lock)
+        self.reading = collections.Counter()         # file index -> any client's requests being served now (under lock)
         self.requests = collections.deque(maxlen=80) # recorded when they start; 'sent' grows as bytes go out
         self.stalls = collections.deque(maxlen=40)   # a piece that kept the TV waiting, when it happened
         self.waiting = {}         # reader -> (file index, since, mid-stream?): pieces being waited for right now
@@ -827,8 +828,30 @@ class Engine:
             done = t.handle.file_progress(lt.torrent_handle.piece_granularity)
         except RuntimeError:
             return None
-        return [{'name': f['name'], 'length': f['length'], 'done': round(done[i] / f['length'], 4) if f['length'] else 0}
+        return [{'idx': i, 'name': f['name'], 'length': f['length'], 'done': round(done[i] / f['length'], 4) if f['length'] else 0}
                 for i, f in enumerate(t.files())]
+
+    def busy_files(self, ih):
+        """Indexes of the files of a torrent that some client is reading right now."""
+        t = self.torrents.get(ih)
+        if not t:
+            return set()
+        with t.lock:
+            return {i for i, n in t.reading.items() if n > 0}
+
+    def offline(self, ih, fn, timeout=10):
+        """Run fn() with the torrent out of the session and kept out — to edit its saved state on disk. A
+        torrent nobody is reading is taken out first (its state saved); one being read is left alone (None)."""
+        t = self.torrents.get(ih)
+        if t:
+            if t.live_readers() or self.busy_files(ih):
+                return None
+            self.drop(t, 'taken out to delete a file from the dashboard')
+            end = time.time() + timeout
+            while ih in self.torrents and time.time() < end:
+                time.sleep(0.1)
+        with self.lock:          # get() takes this lock, so the torrent can't come back mid-edit
+            return None if ih in self.torrents else fn()
 
     def dashboard_sessions(self):
         """Snapshots of every file the TV has read in a torrent still in the session."""
@@ -1056,7 +1079,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_bytes(403, 'text/plain', b'')
             if path in ('/ui', '/ui/', '/ui/api/state'):
                 return self.ui(path)
-            if path in ('/ui/api/cache/delete', '/ui/api/cache/clear') and self.command == 'POST':
+            if path in ('/ui/api/cache/delete', '/ui/api/cache/clear', '/ui/api/cache/delete-file') and self.command == 'POST':
                 return self.ui_change(path)
             # Another device running Stremio (a phone) polls like the TV does; the one streaming wins for 10 min.
             if ((path.endswith('/stats.json') or path in REMEMBERED) and time.time() - Handler.tv_streamed_at > 600
@@ -1188,7 +1211,9 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_bytes(403, 'application/json', b'{"ok": false, "message": "Not allowed"}')
         if not self.dashboard:
             return self.send_bytes(503, 'application/json', b'{"ok": false, "message": "dashboard not running"}')
-        out = self.dashboard.delete(body.get('ih')) if path.endswith('/delete') else self.dashboard.clear()
+        out = (self.dashboard.delete(body.get('ih')) if path.endswith('/delete')
+               else self.dashboard.delete_file(body.get('ih'), body.get('idx')) if path.endswith('/delete-file')
+               else self.dashboard.clear())
         return self.send_bytes(200, 'application/json; charset=utf-8', json.dumps(out).encode())
 
     def ui(self, path):
@@ -1353,12 +1378,15 @@ class Handler(BaseHTTPRequestHandler):
                 t.positions[idx] = (0 if index_read else start, time.time())
             record = {'at': round(self.t0, 2), 'idx': idx, 'start': start, 'sent': 0, 'took': 0, 'wait': 0, 'write': 0, 'ok': None}
             t.requests.append(record)
+        with t.lock:
+            t.reading[idx] += 1
         try:
             ok = self.send_range(t, idx, start, end, t.patches_for(idx, f['name'], size),
                                  track=player and not index_read, record=record)
         finally:
-            if player:
-                with t.lock:
+            with t.lock:
+                t.reading[idx] -= 1
+                if player:
                     t.open_requests[idx] -= 1
         took = time.time() - self.t0
         tm = getattr(self, 'timing', {})
@@ -1599,6 +1627,7 @@ def main():
         facts=lambda key: Handler.prober.store.get(key) if Handler.prober else None,
         config=CONFIG, install_dir=INSTALL_DIR, log=log, phone_url=phone_url,
         in_session=lambda: set(engine.torrents), live_progress=engine.file_progress,
+        busy_files=engine.busy_files, offline=engine.offline,
         tv_ip=lambda: Handler.tv_ip or last_tv_ip(_tail_log(), own_ips()))
     servers = []
     plain = PlainServer(('0.0.0.0', CONFIG['http_port']), Handler)

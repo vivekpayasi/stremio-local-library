@@ -9,8 +9,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'src'))
 
-from dashboard import (Dashboard, account_status, bdecode, cache_entries, cached_progress, classify_requests,  # noqa: E402
-                       clear_cache,
+from dashboard import (Dashboard, account_status, bdecode, bencode, cache_entries, cached_progress,  # noqa: E402
+                       classify_requests, clear_cache, delete_file_cached,
                        delete_cached, resume_progress, filter_log, health, last_tv_ip, parse_mac_wifi, parse_ping, parse_tv_snapshot,
                        piece_strip, summarize_session, title_for, ui_allowed, ui_write_allowed)
 
@@ -465,7 +465,7 @@ class Resume(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / '.resume'
             p.write_bytes(benc({'info': {'name': 'Movie.mkv', 'piece length': MB, 'length': 4 * MB}, 'pieces': bytes([0b10000000])}))
-            self.assertEqual(resume_progress(p), [{'name': 'Movie.mkv', 'length': 4 * MB, 'done': 0.25}])
+            self.assertEqual(resume_progress(p), [{'idx': 0, 'name': 'Movie.mkv', 'length': 4 * MB, 'done': 0.25}])
             self.assertEqual(resume_progress(Path(d) / 'nope'), [])
 
     def test_cache_rows_carry_the_files_with_data(self):
@@ -494,6 +494,85 @@ class Resume(unittest.TestCase):
                         {'name': 'poster.png', 'length': 80_000, 'done': 1.0}]
             row = cache_entries(d, {'a' * 40}, {}, live_progress=lambda ih: progress)[0]
             self.assertEqual([f['name'] for f in row['files']], ['Show.S01E03.mkv', 'Show.S01E02.mkv'])
+
+
+class DeleteOneFile(unittest.TestCase):
+    # A pack of three episodes, 4 MB pieces: E01 = bytes 0-10 MB (pieces 0-2), E02 = 10-18 MB (pieces 2-4),
+    # E03 = 18-24 MB (pieces 4-5). Every piece is downloaded.
+    IH = 'a' * 40
+    INFO = {'name': 'Show S01', 'piece length': 4 * MB,
+            'files': [{'length': 10 * MB, 'path': ['E01.mkv']}, {'length': 8 * MB, 'path': ['E02.mkv']},
+                      {'length': 6 * MB, 'path': ['E03.mkv']}]}
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        t = self.dir / self.IH / 'Show S01'
+        t.mkdir(parents=True)
+        for name, size in (('E01.mkv', 10), ('E02.mkv', 8), ('E03.mkv', 6)):
+            (t / name).write_bytes(b'x' * size * MB)
+        resume = {'info': self.INFO, 'pieces': bytes([0b11111100]), 'file_priority': [4, 4, 4],
+                  'unfinished': [{'piece': 3, 'bitmask': b'\x01'}], 'name': 'Show S01'}
+        (self.dir / self.IH / '.resume').write_bytes(bencode(resume))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_bencode_round_trip(self):
+        v = {b'a': [1, b'xy', {b'z': 0}], b'b': b''}
+        self.assertEqual(bdecode(bencode(v)), v)
+
+    def test_the_file_goes_and_its_pieces_are_marked_missing(self):
+        ok, msg, freed = delete_file_cached(self.dir, self.IH, 1)
+        self.assertTrue(ok, msg)
+        self.assertGreaterEqual(freed, 8 * MB)
+        self.assertFalse((self.dir / self.IH / 'Show S01' / 'E02.mkv').exists())
+        self.assertTrue((self.dir / self.IH / 'Show S01' / 'E01.mkv').exists())
+        r = bdecode((self.dir / self.IH / '.resume').read_bytes())
+        # Pieces 2-4 overlap E02 (2 and 4 are shared with its neighbours): all three must be fetched again.
+        self.assertEqual(r[b'pieces'], bytes([0b11000100]))
+        self.assertEqual(r[b'file_priority'], [4, 0, 4])
+        self.assertEqual(r[b'unfinished'], [], 'a half-done piece of the deleted file is forgotten too')
+        self.assertEqual(r[b'info'], bdecode(bencode(self.INFO)), 'the torrent itself is untouched')
+
+    def test_bad_requests(self):
+        for ih, idx in (('../x', 0), (self.IH, 9), (self.IH, -1), ('b' * 40, 0), (self.IH, 'x')):
+            ok, _, _ = delete_file_cached(self.dir, ih, idx)
+            self.assertFalse(ok, (ih, idx))
+
+    def dash(self, busy=(), in_session=(), offline=None):
+        calls = []
+
+        def run_offline(ih, fn):
+            calls.append(ih)
+            return fn() if offline is None else offline
+        d = Dashboard(sessions=lambda: [], facts=lambda k: None, install_dir=self.tmp.name, log=lambda *a: None,
+                      config={'cache_dir': str(self.dir), 'cache_budget_gb': 15}, in_session=lambda: set(in_session),
+                      busy_files=lambda ih: set(busy), offline=run_offline)
+        return d, calls
+
+    def test_the_dashboard_deletes_a_file_with_the_torrent_held_out_of_the_session(self):
+        d, calls = self.dash(in_session={self.IH})
+        out = d.delete_file(self.IH, 0)
+        self.assertTrue(out['ok'], out)
+        self.assertEqual(calls, [self.IH])
+        self.assertFalse((self.dir / self.IH / 'Show S01' / 'E01.mkv').exists())
+
+    def test_a_file_being_read_is_not_deleted(self):
+        d, calls = self.dash(busy={0}, in_session={self.IH})
+        out = d.delete_file(self.IH, 0)
+        self.assertFalse(out['ok'])
+        self.assertIn('being read', out['message'])
+        self.assertEqual(calls, [])
+        self.assertTrue((self.dir / self.IH / 'Show S01' / 'E01.mkv').exists())
+
+    def test_another_file_being_read_means_try_again_later(self):
+        d, _ = self.dash(busy={1}, in_session={self.IH}, offline=False)
+        out = d.delete_file(self.IH, 0)
+        self.assertFalse(out['ok'])
+        self.assertIn('once it stops', out['message'])
+        self.assertTrue((self.dir / self.IH / 'Show S01' / 'E01.mkv').exists())
 
 
 class CachedProgress(unittest.TestCase):

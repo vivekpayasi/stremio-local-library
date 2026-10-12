@@ -217,6 +217,24 @@ def bdecode(data):
     return dec(0)[0]
 
 
+def bencode(v):
+    """The reverse of bdecode (dictionary keys sorted, as the format requires)."""
+    if isinstance(v, bool):
+        v = int(v)
+    if isinstance(v, int):
+        return b'i%de' % v
+    if isinstance(v, str):
+        v = v.encode()
+    if isinstance(v, bytes):
+        return b'%d:%s' % (len(v), v)
+    if isinstance(v, list):
+        return b'l' + b''.join(bencode(x) for x in v) + b'e'
+    if isinstance(v, dict):
+        items = sorted((k.encode() if isinstance(k, str) else k, x) for k, x in v.items())
+        return b'd' + b''.join(bencode(k) + bencode(x) for k, x in items) + b'e'
+    raise TypeError(f'cannot bencode {type(v).__name__}')
+
+
 def resume_progress(path):
     """[{name, length, done}] for each file of a cached torrent, from libtorrent's resume data: the torrent's
     file list and its bitmap of downloaded pieces (one bit per piece, first piece in the high bit)."""
@@ -235,13 +253,13 @@ def resume_progress(path):
             for p in range(offset // plen, (offset + length - 1) // plen + 1):
                 if have(p):
                     done += min((p + 1) * plen, offset + length) - max(p * plen, offset)
-        out.append({'name': f[b'path'][-1].decode(errors='replace'), 'length': length,
+        out.append({'idx': len(out), 'name': f[b'path'][-1].decode(errors='replace'), 'length': length,
                     'done': round(done / length, 4) if length else 0})
         offset += length
     return out
 
 
-def cache_entries(cache_dir, in_session, titles, live_progress=None):
+def cache_entries(cache_dir, in_session, titles, live_progress=None, busy_files=None):
     """Every torrent in the cache, most recently used first: its name, title, size on disk, whether it's in use,
     and how much of each file that has any data is downloaded (live for a torrent in the session)."""
     rows = []
@@ -254,6 +272,8 @@ def cache_entries(cache_dir, in_session, titles, live_progress=None):
         names = sorted(p.name for p in d.iterdir() if not p.name.startswith('.'))
         t = titles.get(d.name) or {}
         files = (live_progress(d.name) if live_progress and d.name in in_session else None) or resume_progress(d / '.resume')
+        busy = busy_files(d.name) if busy_files and d.name in in_session else set()
+        files = [dict(f, idx=f.get('idx', i), busy=f.get('idx', i) in busy) for i, f in enumerate(files)]
         rows.append({'ih': d.name, 'name': names[0] if names else d.name[:8], 'title': t.get('name'),
                      'poster': t.get('poster'), 'bytes': _usage(d), 'last_used': used, 'in_use': _in_use(d, in_session),
                      # Videos only (not the .nfo or poster that come along), at least 1% in (not a piece shared
@@ -278,6 +298,53 @@ def cached_progress(cache_dir, in_session, live_progress=None):
         if got:
             out[d.name] = got
     return out
+
+
+def delete_file_cached(cache_dir, ih, idx):
+    """Delete one file of a cached torrent — an episode of a season pack — that is not in the session:
+    (deleted?, message, bytes freed). Its pieces are marked missing in the resume data first, including the
+    ones it shares with its neighbours, so libtorrent fetches them again rather than reading a file that is
+    gone; then the file is removed."""
+    if not isinstance(ih, str) or not IH_DIR.fullmatch(ih) or not isinstance(idx, int) or isinstance(idx, bool):
+        return False, 'Not a file in the cache', 0
+    d = Path(cache_dir) / ih
+    try:
+        resume = bdecode((d / '.resume').read_bytes())
+        info, plen = resume[b'info'], resume[b'info'][b'piece length']
+    except (OSError, ValueError, KeyError, IndexError, TypeError):
+        return False, 'Not a file in the cache', 0
+    files = info.get(b'files')
+    entries = files or [{b'length': info.get(b'length', 0), b'path': []}]
+    if not 0 <= idx < len(entries):
+        return False, 'Not a file in the cache', 0
+    offset = sum(f[b'length'] for f in entries[:idx])
+    length = entries[idx][b'length']
+    path = d.joinpath(info[b'name'].decode(errors='replace'), *(p.decode(errors='replace') for p in entries[idx][b'path']))
+    if not path.resolve().is_relative_to(d.resolve()):
+        return False, 'Not a file in the cache', 0
+    first, last = offset // plen, (offset + max(length, 1) - 1) // plen
+
+    bits = bytearray(resume.get(b'pieces', b''))
+    for p in range(first, last + 1):
+        if p >> 3 < len(bits):
+            bits[p >> 3] &= ~(0x80 >> (p & 7)) & 0xFF
+    resume[b'pieces'] = bytes(bits)
+    resume[b'unfinished'] = [u for u in resume.get(b'unfinished', []) if not first <= u.get(b'piece', -1) <= last]
+    if isinstance(resume.get(b'file_priority'), list) and idx < len(resume[b'file_priority']):
+        resume[b'file_priority'][idx] = 0
+    tmp = d / '.resume.tmp'
+    tmp.write_bytes(bencode(resume))
+    os.replace(tmp, d / '.resume')
+
+    freed = 0
+    try:
+        freed = path.lstat().st_blocks * 512
+        path.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        return False, f'Could not delete the file: {e.strerror}', 0
+    return True, 'Deleted', freed
 
 
 def delete_cached(cache_dir, ih, in_session):
@@ -559,9 +626,11 @@ class Dashboard:
     VIEWED_S = 60          # keep the slow collectors running this long after the last poll
 
     def __init__(self, sessions, facts, config, install_dir, log, tv_ip=lambda: None, started=None,
-                 phone_url=lambda: None, in_session=lambda: set(), live_progress=None):
+                 phone_url=lambda: None, in_session=lambda: set(), live_progress=None, busy_files=None, offline=None):
         self.sessions, self.facts, self.config, self.log = sessions, facts, config, log
         self.in_session, self.live_progress = in_session, live_progress
+        self.busy_files = busy_files    # ih -> {file index being read}, for torrents in the session
+        self.offline = offline          # (ih, fn) -> fn()'s result with the torrent out of the session, or None if busy
         self.phone_url = phone_url
         self.dir = Path(install_dir)
         self.tv_ip = tv_ip
@@ -612,7 +681,7 @@ class Dashboard:
                     pass
         self.slow['cache'] = {'used': used, 'budget': self.config['cache_budget_gb'] * 1024 * MB,
                               'free': shutil.disk_usage(cache).free}
-        self.slow['cache_list'] = cache_entries(cache, self.in_session(), self._titles(), self.live_progress)
+        self.slow['cache_list'] = cache_entries(cache, self.in_session(), self._titles(), self.live_progress, self.busy_files)
 
     # ---- changes, from the dashboard's buttons
 
@@ -620,6 +689,27 @@ class Dashboard:
         ok, msg, freed = delete_cached(self.config['cache_dir'], ih, self.in_session())
         if ok:
             self.log(f'cache: deleted {ih[:8]} ({freed / MB:.0f} MB) from the dashboard')
+        self._cache()
+        return {'ok': ok, 'message': msg, 'freed': freed}
+
+    def delete_file(self, ih, idx):
+        """Delete one episode of a cached season pack, unless something in that torrent is being read."""
+        def no(message):
+            return {'ok': False, 'message': message, 'freed': 0}
+        if not isinstance(idx, int) or isinstance(idx, bool) or not isinstance(ih, str) or not IH_DIR.fullmatch(ih):
+            return no('Not a file in the cache')
+        busy = self.busy_files(ih) if self.busy_files and ih in self.in_session() else set()
+        if idx in busy:
+            return no('It\'s being read right now, by the TV or a download.')
+        if busy:
+            return no('Another file of this torrent is being read right now. You can delete this one once it stops.')
+        run = self.offline or (lambda _ih, fn: fn())
+        result = run(ih, lambda: delete_file_cached(self.config['cache_dir'], ih, idx))
+        if not result:
+            return no('The torrent is busy. Try again in a minute.')
+        ok, msg, freed = result
+        if ok:
+            self.log(f'cache: deleted file {idx} of {ih[:8]} ({freed / MB:.0f} MB) from the dashboard')
         self._cache()
         return {'ok': ok, 'message': msg, 'freed': freed}
 
