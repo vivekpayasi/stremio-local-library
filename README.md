@@ -221,6 +221,8 @@ Settings in `advisor.json`:
   fit on disk, or when it would take the pack itself past the cache budget — the cache would then delete the
   whole pack once idle; delete the episodes you've watched first. Older downloads not in use make room for it.
   Cancel keeps what has arrived, and asking again carries on from there (also after a restart of the server).
+  A downloaded episode stays as long as the cache budget allows: like everything in the cache, the oldest is
+  deleted first when newer downloads need the room.
 
 The status line at the top says in one sentence whether things are fine and, if not, why. The page works
 on a phone: it shows what is being watched, so by default only this Mac can open it. To open it from other

@@ -93,6 +93,8 @@ class Prefetcher:
                 else:
                     s.clear()
                 rate = (s[-1][1] - s[0][1]) / (s[-1][0] - s[0][0]) if len(s) > 1 and s[-1][0] > s[0][0] else None
+                if rate == 0 and s[-1][0] - s[0][0] < RATE_S * 0.8:
+                    rate = None      # progress counts whole pieces: a few seconds without one isn't a stall yet
                 left = j['length'] * (1 - j['done'])
                 out.append({'ih': j['ih'], 'idx': j['idx'], 'label': j['label'], 'state': j['state'],
                             'done': j['done'], 'length': j['length'], 'message': j['message'],

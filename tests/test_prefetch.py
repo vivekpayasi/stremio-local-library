@@ -325,6 +325,23 @@ class Progress(unittest.TestCase):
         self.assertEqual(j['eta_s'], 15)   # 3 MB left at 209715.2 B/s
         p.cancel(IH, 1)
 
+    def test_no_whole_piece_for_a_few_seconds_is_not_yet_a_stall(self):
+        # Progress counts whole pieces: with 16 MB ones, the first seconds after starting show nothing arriving.
+        now = [100.0]
+        t = FakeTorrent()
+        t.held = set(range(12))
+        p = Prefetcher(FakeEngine(t), lambda *a: None, wait_s=0.01, clock=lambda: now[0])
+        p.start(IH, 1, 'S01E02')
+        self.assertTrue(until(lambda: p.jobs()[0]['state'] == 'downloading'))
+        for at in range(102, 112, 2):
+            now[0] = float(at)
+            self.assertIsNone(p.jobs()[0]['mbps'], at)
+        for at in range(112, 120, 2):
+            now[0] = float(at)
+            j = p.jobs()[0]
+        self.assertEqual(j['mbps'], 0.0, 'nothing for 18 s is a stall')
+        p.cancel(IH, 1)
+
     def test_finished_jobs_are_listed_for_a_while(self):
         now = [100.0]
         p = Prefetcher(FakeEngine(FakeTorrent()), lambda *a: None, wait_s=0.01, clock=lambda: now[0])
