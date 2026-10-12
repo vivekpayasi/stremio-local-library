@@ -184,6 +184,7 @@ Settings in `advisor.json`:
 | --- | --- | --- |
 | `upstreams` | your Torrentio | stream addons whose lists are rated, `[{ "name", "url" }]` |
 | `sort` | `"original"` | `"rating"` lists the best-rated streams first |
+| `display` | `"compact"` | the text on each stream card: `"compact"` rebuilds it into short lines (the verdict, who released it and how, Torrentio's stats and languages, then the full name); `"full"` puts the reasons above Torrentio's own text |
 | `probe.enabled` | `false` | also probe the top `probe.top` unplayed streams of each list in the background (a few MB each), so their ratings are verified next time |
 | `enabled` | `true` | `false` turns the advisor off |
 
@@ -205,6 +206,9 @@ Settings in `advisor.json`:
   living-room link.
 - **This Mac** and **Library** — the torrent server's CPU and memory, cache use, the library, the Stream
   Advisor and the state of your Stremio account. And the server log, without the TV's constant polling.
+- **Downloaded torrents** — everything in the torrent cache, newest first, with its size and when it was last
+  used. Delete one, or everything not in use, to free disk space. Whatever is playing, or was read in the last
+  two minutes, can't be deleted.
 
 The status line at the top says in one sentence whether things are fine and, if not, why. The page works
 on a phone: it shows what is being watched, so by default only this Mac can open it. To open it from other

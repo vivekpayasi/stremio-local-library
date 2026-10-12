@@ -157,12 +157,12 @@ function resolutionOf(v) {
 
 // ---------------------------------------------------------------- rating
 
-/** A profile entry as {cap, why}, or null when it does not limit anything. */
+/** A profile entry as {cap, why, short}, or null when it does not limit anything. */
 function ruleOf(v, fallbackWhy) {
   if (v == null) return null;
   const r = typeof v === 'number' ? { cap: v } : v;
   if (typeof r.cap !== 'number' || r.cap >= 5) return null;
-  return { cap: r.cap, why: r.why ?? fallbackWhy };
+  return { cap: r.cap, why: r.why ?? fallbackWhy, short: r.short ?? null };
 }
 
 const fill = (why, n) => String(why).replaceAll('{n}', n ?? '');
@@ -176,7 +176,9 @@ export function rate(stream, { profile, facts = null, runtimeMin = null } = {}) 
   const verified = Boolean(facts);
   const issues = [];
   const notes = [];
-  const add = (rule, n) => { if (rule) issues.push({ cap: rule.cap, why: fill(rule.why, n) }); };
+  const add = (rule, n) => {
+    if (rule) issues.push({ cap: rule.cap, why: fill(rule.why, n), short: rule.short ? fill(rule.short, n) : null });
+  };
 
   // What the file is: measured when we have facts, guessed from the name otherwise.
   const container = facts?.container ?? name.container;
@@ -261,12 +263,15 @@ export function rate(stream, { profile, facts = null, runtimeMin = null } = {}) 
   const audioShown = lead ? audioClass(lead) : name.audio.find((c) => !rulesFor(c)) ?? name.audio[0];
   if (audioShown) summary.push(audioLabel(audioShown));
   // A profile is shown only when measured or stated, not when assumed from the other tags.
-  if (dv != null) summary.push(typeof dv === 'number' && (verified || name.video.dvStated) ? `DV P${dv}` : 'DV');
-  else if (hdr) summary.push(hdr);
-  if (bitrateMbps != null) summary.push(`${estimated ? '~' : ''}${Math.round(bitrateMbps)} Mbps`);
+  const picture = dv != null ? (typeof dv === 'number' && (verified || name.video.dvStated) ? `DV P${dv}` : 'DV') : hdr;
+  if (picture) summary.push(picture);
+  const rate_ = bitrateMbps != null ? `${estimated ? '~' : ''}${Math.round(bitrateMbps)} Mbps` : null;
+  if (rate_) summary.push(rate_);
   if (name.peers != null) summary.push(`${name.peers} peers`);
+  // The TV card already shows the container in the name and the peers in Torrentio's stats line.
+  const brief = [picture, audioShown && audioLabel(audioShown), rate_].filter(Boolean);
 
-  return { stars, issues, notes, summary, verified, bitrateMbps, estimated };
+  return { stars, issues, notes, summary, brief, verified, bitrateMbps, estimated };
 }
 
 // ---------------------------------------------------------------- display
@@ -277,35 +282,79 @@ export const starsOf = (n) => '⭐'.repeat(n);
 /** The stars a decorated stream shows (0 when it was passed through unrated). */
 export const starsIn = (stream) => (String(stream?.name ?? '').split('\n')[0].match(/⭐/gu) ?? []).length;
 
+const SOURCES = [
+  [/(?:bd)?remux/, 'REMUX'], [/web[ -]?dl|webdl/, 'WEB-DL'], [/web[ -]?rip/, 'WEBRip'], [/blu ?-?ray/, 'BluRay'],
+  [/bd ?rip|br ?rip/, 'BDRip'], [/uhd ?rip/, 'UHDRip'], [/hdtv/, 'HDTV'], [/dvd ?rip/, 'DVDRip'], [/web/, 'WEB'],
+];
+const CODECS = [[/x ?265/, 'x265'], [/hevc|h ?265/, 'HEVC'], [/av1/, 'AV1'], [/x ?264/, 'x264'], [/avc|h ?264/, 'H.264']];
+
+/** "Accid · BDRip · x265": who released it, from what source, encoded how. */
+export function releaseLabel(release, filename) {
+  const group = (s) => {
+    const t = String(s ?? '').replace(/\.[a-z0-9]{2,4}$/i, '').trim();
+    if (t.endsWith('…')) return null;
+    return /\[([A-Za-z0-9][A-Za-z0-9 ._]{1,20})\]$/.exec(t)?.[1] ?? /-([A-Za-z0-9]{2,20})$/.exec(t)?.[1] ?? null;
+  };
+  const text = ` ${`${release ?? ''} ${filename ?? ''}`.toLowerCase().replace(/[._]/g, ' ')} `;
+  const tok = (re) => new RegExp(`(?<![a-z0-9])(?:${re.source})(?![a-z0-9])`).test(text);
+  return [group(release) ?? group(filename), SOURCES.find(([re]) => tok(re))?.[1], CODECS.find(([re]) => tok(re))?.[1]]
+    .filter(Boolean).join(' · ');
+}
+
+function verdict(r) {
+  if (r.issues.length) {
+    const i = r.issues[0];
+    return `${i.cap <= 2 ? '✗' : '⚠'} ${i.short ?? i.why}${r.issues.length > 1 ? ` (+${r.issues.length - 1})` : ''}`
+      + (r.verified ? ' (checked)' : '');
+  }
+  return `✓ ${r.brief.length ? r.brief.join(' · ') : 'Should play fine'}${r.verified ? ' (checked)' : ''}`;
+}
+
 /**
- * The same stream with its rating shown: stars in the name (the short left column on the TV), and a
- * reasons line above the upstream's own text. Everything that makes it play is left untouched.
+ * The same stream with its rating shown: stars in the name (the narrow left column on the TV) and the reasons
+ * in the description. Everything that makes it play is left untouched.
+ *
+ * 'compact' (the default) rebuilds Torrentio's description into short lines, most useful first — the TV shows
+ * each stream as a narrow card with room for about eight. 'full' puts the reasons above the upstream's own text.
  */
-export function decorate(stream, r) {
+export function decorate(stream, r, { style = 'compact' } = {}) {
   const lines = (stream.name ?? '').split('\n');
   const rest = lines.length > 1 ? lines.slice(1).join('\n') : lines[0];
   // Torrentio marks debrid streams on the first line ("[RD+] Torrentio"): keep that tag.
   const tag = /^\s*(\[[^\]]+\])/.exec(lines[0])?.[1];
   const stars = tag ? `${starsOf(r.stars)} ${tag}` : starsOf(r.stars);
-  const reasons = r.issues.length
-    ? r.issues.slice(0, 2).map((i) => `${i.cap <= 2 ? '✗' : '⚠'} ${i.why}`).join(' · ') + (r.verified ? ' · verified' : '')
-    : `✓ ${[...(r.verified ? ['verified'] : []), ...r.summary, ...r.notes].join(' · ')}`;
   const field = stream.title == null && stream.description != null ? 'description' : 'title';
   const text = stream[field];
-  return {
-    ...stream,
-    name: rest ? `${stars}\n${rest}` : stars,
-    [field]: text ? `${reasons}\n${text}` : reasons,
-  };
+
+  let out;
+  if (style === 'full') {
+    const reasons = r.issues.length
+      ? r.issues.slice(0, 2).map((i) => `${i.cap <= 2 ? '✗' : '⚠'} ${i.why}`).join(' · ') + (r.verified ? ' · verified' : '')
+      : `✓ ${[...(r.verified ? ['verified'] : []), ...r.summary, ...r.notes].join(' · ')}`;
+    out = text ? `${reasons}\n${text}` : reasons;
+  } else {
+    const own = String(text ?? '').split('\n');
+    const at = own.findIndex((l) => /👤|💾/.test(l));
+    const notes = r.notes.map((n) => `⚠ ${n[0].toUpperCase()}${n.slice(1)}`);
+    if (at === -1) {
+      out = [verdict(r), ...notes, ...own.filter((l) => l.trim())].join('\n');
+    } else {
+      // Torrentio: release name, then the file's name for packs (the episode is already chosen), the stats
+      // line, then languages. The full release name goes last, where the TV cuts it off first.
+      out = [verdict(r), ...notes, releaseLabel(own[0], stream.behaviorHints?.filename), own[at],
+        ...own.slice(at + 1).filter((l) => l.trim()), at > 0 ? own[0] : null].filter(Boolean).join('\n');
+    }
+  }
+  return { ...stream, name: rest ? `${stars}\n${rest}` : stars, [field]: out };
 }
 
 /** Rate and decorate a whole list; `sort: 'rating'` puts the best first (stable within a rating). */
-export function adviseStreams(streams, { profile, runtimeMin = null, factsFor = () => null, sort = 'original' } = {}) {
+export function adviseStreams(streams, { profile, runtimeMin = null, factsFor = () => null, sort = 'original', display } = {}) {
   const rated = streams.filter((s) => s && typeof s === 'object').map((s) => {
     // One stream this code can't read is passed through as it came, not allowed to sink the list.
     try {
       const r = rate(s, { profile, runtimeMin, facts: factsFor(s) });
-      return { s: decorate(s, r), stars: r.stars };
+      return { s: decorate(s, r, { style: display }), stars: r.stars };
     } catch {
       return { s, stars: 0 };
     }

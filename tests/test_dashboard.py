@@ -9,9 +9,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'src'))
 
-from dashboard import (Dashboard, account_status, classify_requests, filter_log, health, last_tv_ip,  # noqa: E402
-                       parse_mac_wifi, parse_ping, parse_tv_snapshot, piece_strip, summarize_session, title_for,
-                       ui_allowed)
+from dashboard import (Dashboard, account_status, cache_entries, classify_requests, clear_cache,  # noqa: E402
+                       delete_cached, filter_log, health, last_tv_ip, parse_mac_wifi, parse_ping, parse_tv_snapshot,
+                       piece_strip, summarize_session, title_for, ui_allowed, ui_write_allowed)
 
 MB = 1024 * 1024
 
@@ -352,6 +352,82 @@ class Access(unittest.TestCase):
         self.assertFalse(self.ok('127.0.0.1', 'localhost:11472', 'cross-site'), 'a web page fetching localhost')
         self.assertFalse(self.ok('127.0.0.1', 'evil.example:11472'), 'DNS rebinding')
         self.assertFalse(self.ok('192.168.0.57', 'evil.example:12472', lan=True))
+
+
+class Cache(unittest.TestCase):
+    A, B, C = 'a' * 40, 'b' * 40, 'c' * 40
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        for ih, name, mb, used in ((self.A, 'Chernobyl - S01 [Accid]', 3, 2000), (self.B, 'Troy.2004.mkv', 1, 1000),
+                                   (self.C, 'Obsession.mkv', 2, 3000)):
+            d = self.dir / ih
+            (d / name).mkdir(parents=True) if not name.endswith('.mkv') else d.mkdir(parents=True)
+            target = d / name / 'E01.mkv' if not name.endswith('.mkv') else d / name
+            target.write_bytes(b'x' * mb * MB)
+            (d / '.last-used').write_text(str(used))
+            (d / '.resume').write_bytes(b'd')
+        (self.dir / 'not-a-torrent').mkdir()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_lists_each_torrent_newest_first_with_its_name_size_and_title(self):
+        titles = {self.A: {'name': 'Chernobyl', 'poster': 'p'}}
+        rows = cache_entries(self.dir, in_session={self.C}, titles=titles)
+        self.assertEqual([r['ih'] for r in rows], [self.C, self.A, self.B])
+        a = rows[1]
+        self.assertEqual(a['name'], 'Chernobyl - S01 [Accid]')
+        self.assertEqual(a['title'], 'Chernobyl')
+        self.assertGreaterEqual(a['bytes'], 3 * MB)
+        self.assertEqual(a['last_used'], 2000)
+        self.assertTrue(rows[0]['in_use'])
+        self.assertFalse(a['in_use'])
+
+    def test_delete_one_unless_it_is_in_use(self):
+        ok, msg, freed = delete_cached(self.dir, self.C, in_session={self.C})
+        self.assertFalse(ok)
+        self.assertIn('in use', msg)
+        self.assertTrue((self.dir / self.C).exists())
+        ok, msg, freed = delete_cached(self.dir, self.A, in_session={self.C})
+        self.assertTrue(ok)
+        self.assertGreaterEqual(freed, 3 * MB)
+        self.assertFalse((self.dir / self.A).exists())
+
+    def test_a_torrent_used_moments_ago_counts_as_in_use(self):
+        # Between a server restart and the reader reconnecting, a torrent being read is briefly not in the session.
+        import time as _t
+        (self.dir / self.B / '.last-used').write_text(str(_t.time() - 30))
+        ok, msg, _ = delete_cached(self.dir, self.B, in_session=set())
+        self.assertFalse(ok)
+        self.assertIn('in use', msg)
+        self.assertTrue([r for r in cache_entries(self.dir, set(), {}) if r['ih'] == self.B][0]['in_use'])
+        deleted, _ = clear_cache(self.dir, in_session=set())
+        self.assertNotIn(self.B, deleted)
+        self.assertTrue((self.dir / self.B).exists())
+
+    def test_only_cache_folders_can_be_deleted(self):
+        for bad in ('../x', 'not-a-torrent', self.A[:39], '/etc'):
+            ok, _, _ = delete_cached(self.dir, bad, in_session=set())
+            self.assertFalse(ok, bad)
+        self.assertTrue((self.dir / 'not-a-torrent').exists())
+
+    def test_clear_everything_not_in_use(self):
+        deleted, freed = clear_cache(self.dir, in_session={self.C})
+        self.assertEqual(sorted(deleted), sorted([self.A, self.B]))
+        self.assertGreaterEqual(freed, 4 * MB)
+        self.assertTrue((self.dir / self.C).exists())
+
+    def test_changes_need_the_dashboard_itself(self):
+        args = dict(lan=True, own={'127.0.0.1', '192.168.0.101'}, cert_suffix='.x.stremio.rocks')
+        self.assertTrue(ui_write_allowed('127.0.0.1', 'localhost:11472', 'same-origin', '1', **args))
+        self.assertTrue(ui_write_allowed('192.168.0.57', '192.168.0.101:11472', 'same-origin', '1', **args))
+        self.assertFalse(ui_write_allowed('127.0.0.1', 'localhost:11472', 'same-origin', None, **args), 'a plain form post')
+        self.assertFalse(ui_write_allowed('127.0.0.1', 'localhost:11472', 'same-site', '1', **args))
+        self.assertFalse(ui_write_allowed('192.168.0.57', '192.168.0.101:11472', 'same-origin', '1',
+                                          **dict(args, lan=False)))
 
 
 class TvAddress(unittest.TestCase):

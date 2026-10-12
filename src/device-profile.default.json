@@ -3,7 +3,8 @@
   "about": [
     "How well a stream should play on one TV. Every rule is a cap: a stream gets 5 stars minus nothing,",
     "and each property it has limits it to at most `cap` stars. The lowest cap wins; `why` is what the TV",
-    "shows. {n} in a `why` is replaced by the number the rule measured. Anything not listed is fine.",
+    "shows; `short` is the brief form for the TV's narrow stream cards. {n} is replaced by the number the",
+    "rule measured. Anything not listed is fine.",
     "To adapt this to another TV, put only the rules that differ in ~/.stremio-local-addon/device-profile.json,",
     "e.g. {\"audio\": {\"truehd\": null}} for a TV that decodes TrueHD. Objects merge; lists replace.",
     "Learned on this TV (Oct 2026), from real plays and its decoder list (adb: /vendor/etc/media_codecs*.xml):",
@@ -14,44 +15,44 @@
     "mpv draws green stripes on this TV: use ExoPlayer."
   ],
   "container": {
-    "mp4": { "cap": 4, "why": "MP4 — plays, but embedded subtitles may be hidden" },
-    "mp4-subs-hidden": { "cap": 4, "why": "embedded subtitles hidden (stored away from the video)" },
-    "avi": { "cap": 4, "why": "AVI — old container, seeking can be slow" }
+    "mp4": { "cap": 4, "why": "MP4 — plays, but embedded subtitles may be hidden", "short": "MP4: subtitles may be hidden" },
+    "mp4-subs-hidden": { "cap": 4, "why": "embedded subtitles hidden (stored away from the video)", "short": "Built-in subtitles hidden" },
+    "avi": { "cap": 4, "why": "AVI — old container, seeking can be slow", "short": "AVI: slow seeking" }
   },
   "video": {
-    "avc10": { "cap": 2, "why": "10-bit H.264 — no hardware decoder" },
-    "av1": { "cap": 4, "why": "AV1 — decoder present, not played yet" },
-    "vp9": { "cap": 4, "why": "VP9 — decoder present, not played yet" },
-    "vc1": { "cap": 4, "why": "VC-1 — decoder present, not played yet" },
-    "mpeg2": { "cap": 4, "why": "MPEG-2 — decoder present, not played yet" }
+    "avc10": { "cap": 2, "why": "10-bit H.264 — no hardware decoder", "short": "10-bit H.264: no decoder" },
+    "av1": { "cap": 4, "why": "AV1 — decoder present, not played yet", "short": "AV1: not played here yet" },
+    "vp9": { "cap": 4, "why": "VP9 — decoder present, not played yet", "short": "VP9: not played here yet" },
+    "vc1": { "cap": 4, "why": "VC-1 — decoder present, not played yet", "short": "VC-1: not played here yet" },
+    "mpeg2": { "cap": 4, "why": "MPEG-2 — decoder present, not played yet", "short": "MPEG-2: not played here yet" }
   },
   "dolbyVision": {
-    "5": { "cap": 4, "why": "Dolby Vision profile 5 — untested on this TV" },
-    "7": { "cap": 1, "why": "Dolby Vision profile 7 (Blu-ray) — fails on this TV" },
-    "unknown": { "cap": 4, "why": "Dolby Vision profile unknown (may be profile 5)" }
+    "5": { "cap": 4, "why": "Dolby Vision profile 5 — untested on this TV", "short": "DV profile 5: untested" },
+    "7": { "cap": 1, "why": "Dolby Vision profile 7 (Blu-ray) — fails on this TV", "short": "DV profile 7: fails here" },
+    "unknown": { "cap": 4, "why": "Dolby Vision profile unknown (may be profile 5)", "short": "DV profile unknown" }
   },
   "audio": {
-    "truehd": { "cap": 1, "why": "TrueHD audio — this TV can't decode it" },
-    "pcm": { "cap": 4, "why": "PCM audio — not played yet" },
-    "unknown": { "cap": 4, "why": "audio codec not in the release name" },
-    "mixed": { "cap": 2, "why": "{n} track may play first — this TV can't decode it" }
+    "truehd": { "cap": 1, "why": "TrueHD audio — this TV can't decode it", "short": "TrueHD: TV can't decode" },
+    "pcm": { "cap": 4, "why": "PCM audio — not played yet", "short": "PCM: not played here yet" },
+    "unknown": { "cap": 4, "why": "audio codec not in the release name", "short": "Audio codec unknown" },
+    "mixed": { "cap": 2, "why": "{n} track may play first — this TV can't decode it", "short": "{n} may play first" }
   },
   "resolution": {
-    "4320p": { "cap": 1, "why": "8K — beyond this TV" }
+    "4320p": { "cap": 1, "why": "8K — beyond this TV", "short": "8K: beyond this TV" }
   },
   "tags": {
-    "remux": { "cap": 2, "why": "REMUX — ~60 Mbps with lossless audio" },
-    "upscale": { "cap": 2, "why": "AI upscale — often broken" },
-    "interpolated": { "cap": 2, "why": "frame-interpolated (RIFE) — often broken" },
-    "hfr": { "cap": 3, "why": "{n} fps — often AI-interpolated" }
+    "remux": { "cap": 2, "why": "REMUX — ~60 Mbps with lossless audio", "short": "REMUX: ~60 Mbps" },
+    "upscale": { "cap": 2, "why": "AI upscale — often broken", "short": "AI upscale" },
+    "interpolated": { "cap": 2, "why": "frame-interpolated (RIFE) — often broken", "short": "Frame-interpolated" },
+    "hfr": { "cap": 3, "why": "{n} fps — often AI-interpolated", "short": "{n} fps" }
   },
   "bitrate": [
-    { "above": 48, "cap": 2, "why": "{n} Mbps — too heavy to stream over Wi-Fi" },
-    { "above": 35, "cap": 3, "why": "{n} Mbps — may buffer on Wi-Fi" }
+    { "above": 48, "cap": 2, "why": "{n} Mbps — too heavy to stream over Wi-Fi", "short": "{n} Mbps: too heavy" },
+    { "above": 35, "cap": 3, "why": "{n} Mbps — may buffer on Wi-Fi", "short": "{n} Mbps: may buffer" }
   ],
   "peers": [
-    { "atMost": 0, "cap": 1, "why": "dead swarm — no peers" },
-    { "atMost": 5, "cap": 2, "why": "only {n} peers — may never start" },
-    { "atMost": 14, "cap": 4, "why": "{n} peers — may start slowly" }
+    { "atMost": 0, "cap": 1, "why": "dead swarm — no peers", "short": "No peers" },
+    { "atMost": 5, "cap": 2, "why": "only {n} peers — may never start", "short": "{n} peers: may not start" },
+    { "atMost": 14, "cap": 4, "why": "{n} peers — may start slowly", "short": "{n} peers: slow start" }
   ]
 }

@@ -302,8 +302,8 @@ test('a profile override changes the verdict (a TV that decodes TrueHD)', () => 
 
 // ------------------------------------------------------------------ display
 
-test('decorate puts stars in the name and reasons above Torrentio\'s own text', () => {
-  const out = decorate(R00T, rate(R00T, { profile: PROFILE, runtimeMin: 109 }));
+test('full display: stars in the name and reasons above Torrentio\'s own text', () => {
+  const out = decorate(R00T, rate(R00T, { profile: PROFILE, runtimeMin: 109 }), { style: 'full' });
   assert.equal(out.name, '⭐\n4k DV | HDR');
   const [first, ...rest] = out.title.split('\n');
   assert.match(first, /^✗ TrueHD/);
@@ -313,10 +313,46 @@ test('decorate puts stars in the name and reasons above Torrentio\'s own text', 
   assert.deepEqual(out.behaviorHints, R00T.behaviorHints);
 });
 
-test('decorate summarises a good stream and marks verified facts', () => {
+test('full display: summarises a good stream and marks verified facts', () => {
   const r = rate(BLUDV, { profile: PROFILE, runtimeMin: 109, facts: FACTS.bludv });
-  const first = decorate(BLUDV, r).title.split('\n')[0];
+  const first = decorate(BLUDV, r, { style: 'full' }).title.split('\n')[0];
   assert.equal(first, '✓ verified · MKV · E-AC3 · DV P8 · 26 Mbps · 173 peers');
+});
+
+// The TV shows each stream as a narrow card with room for about eight short lines.
+test('compact display: a verdict, the release in brief, Torrentio\'s stats and languages, then the full name', () => {
+  const r = rate(ACCID, { profile: PROFILE, runtimeMin: 65, facts: {
+    source: 'ffprobe', container: 'mkv', bitrateMbps: 16.0,
+    video: { codec: 'hevc', width: 3840, height: 2160, bitDepth: 10, transfer: 'smpte2084', dv: { profile: 8 } },
+    audio: [{ codec: 'ac3', default: true }, { codec: 'eac3', default: false }], mp4SubsHidden: 0 } });
+  const out = decorate(ACCID, r);
+  assert.deepEqual(out.title.split('\n'), [
+    '✓ DV P8 · AC3 · 16 Mbps (checked)',
+    'Accid · BDRip · x265',
+    '👤 57 💾 6.72 GB ⚙️ 1337x',
+    '🇬🇧 / 🇮🇹',
+    'Chernobyl - S01 (2019 2160p x265 DV 10bit HDR Ita Ac3 Eng Eac3 Sub Ita Eng BDrip) [Accid]',
+  ]);
+  assert.equal(out.name, '⭐⭐⭐⭐⭐\n4k DV | HDR');
+  assert.equal(out.infoHash, ACCID.infoHash);
+  assert.deepEqual(out.behaviorHints, ACCID.behaviorHints);
+});
+
+test('compact display: a problem stream shows its worst issue briefly, and how many more', () => {
+  const out = decorate(FRAMESTOR, rate(FRAMESTOR, { profile: PROFILE, runtimeMin: 65 }));
+  const lines = out.title.split('\n');
+  assert.equal(lines[0], '✗ DV profile 7: fails here (+2)');
+  assert.equal(lines[1], 'FraMeSToR · REMUX · HEVC');
+  assert.equal(lines[2], '👤 110 💾 24.48 GB ⚙️ ThePirateBay');
+  assert.ok(!lines.some((l) => l.startsWith('Chernobyl.S01E01')), 'the pack\'s file-name line is dropped');
+});
+
+test('compact display: an upstream it can\'t parse keeps its text under the verdict', () => {
+  const s = { name: 'MediaFusion\n4K', description: 'Something 4K\nmore', infoHash: hash('e') };
+  const out = decorate(s, rate(s, { profile: PROFILE }));
+  const lines = out.description.split('\n');
+  assert.match(lines[0], /^⚠ Audio codec unknown/);
+  assert.deepEqual(lines.slice(1), ['Something 4K', 'more']);
 });
 
 test('decorate keeps a description field when the upstream uses one', () => {

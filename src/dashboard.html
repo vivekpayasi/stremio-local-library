@@ -109,6 +109,19 @@ dl.kv dd .q { color: var(--muted); }
 .copy { font: inherit; font-size: 13px; color: var(--ink); background: var(--track); border: 0; border-radius: 6px;
   padding: 6px 10px; min-height: 36px; cursor: pointer; text-align: left; overflow-wrap: anywhere; width: 100%; }
 
+.cache-list { list-style: none; padding: 0; margin: 4px 0 12px; }
+.cache-list li { display: grid; grid-template-columns: 1fr auto; gap: 4px 12px; align-items: center; padding: 10px 0;
+  border-top: 1px solid var(--rule); font-size: 14px; }
+.cache-list .c-title { font-weight: 600; overflow-wrap: anywhere; }
+.cache-list .c-sub { display: block; color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
+.cache-list .c-meta { display: block; color: var(--ink-2); font-size: 13px; font-variant-numeric: tabular-nums; margin-top: 2px; }
+.cache-list .c-title { display: block; }
+.cache-list .inuse { font-size: 13px; color: var(--muted); padding: 0 6px; }
+button.del, button.clear { font: inherit; font-size: 14px; min-height: 40px; padding: 6px 14px; border-radius: 8px; cursor: pointer;
+  background: transparent; color: var(--bad); border: 1px solid var(--rule); }
+button.clear { width: 100%; }
+button.del:hover, button.clear:hover { border-color: var(--bad); }
+.cache-msg { font-size: 13px; color: var(--ink-2); min-height: 1.2em; margin-top: 8px; }
 details.log { border-top: 1px solid var(--rule); padding: 14px 0; }
 details.log summary { font-weight: 650; cursor: pointer; min-height: 32px; }
 .log ol { list-style: none; padding: 0; margin-top: 8px; font: 12px/1.55 var(--mono); color: var(--ink-2); }
@@ -142,6 +155,7 @@ details.log summary { font-weight: 650; cursor: pointer; min-height: 32px; }
     <section class="sec" id="mac" aria-labelledby="mac-h"></section>
     <section class="sec" id="library" aria-labelledby="lib-h"></section>
   </div>
+  <section class="sec" id="cache" aria-labelledby="cache-h"></section>
   <details class="log" id="log"><summary>Server log</summary><ol id="loglines"></ol></details>
 </main>
 <script>
@@ -355,6 +369,37 @@ function librarySection(lib) {
   ${lib.account ? `<p class="lead">${lv(lib.account.ok ? 'good' : 'warn', lib.account.text)}</p>` : ''}`;
 }
 
+let cacheMsg = '';
+
+function cacheSection(rows, srv) {
+  const h = '<h2 id="cache-h">Downloaded torrents</h2>';
+  if (!rows) return `${h}<p class="lead">Reading the cache…</p>`;
+  const budget = srv && srv.cache ? ` Beyond ${bytes(srv.cache.budget)}, the oldest are deleted automatically.` : '';
+  const idle = rows.filter((r) => !r.in_use);
+  const idleBytes = idle.reduce((a, r) => a + r.bytes, 0);
+  const now = Date.now() / 1000;
+  if (!rows.length) return `${h}<p class="lead">Nothing is stored. Torrents you play are kept here for rewinds and re-watching.</p>`;
+  return `${h}<p class="lead">Kept on this Mac for rewinds and re-watching.${budget}</p>
+    <ul class="cache-list">${rows.map((r) => `<li>
+      <div><span class="c-title">${esc(r.title || (r.name === r.ih.slice(0, 8) ? `Unknown torrent ${r.name}` : r.name))}</span>${r.title ? `<span class="c-sub">${esc(r.name)}</span>` : ''}
+        <span class="c-meta">${r.bytes ? bytes(r.bytes) : 'Nothing downloaded'}, used ${ago(now - r.last_used)}</span></div>
+      ${r.in_use ? '<span class="inuse">In use</span>'
+        : `<button class="del" type="button" data-del="${esc(r.ih)}" data-label="${esc(r.title || r.name)}" data-size="${esc(bytes(r.bytes))}">Delete</button>`}
+    </li>`).join('')}</ul>
+    ${idle.length > 1 ? `<button class="clear" type="button" data-clear="${idle.length}" data-size="${esc(bytes(idleBytes))}">Delete all ${idle.length} not in use (${bytes(idleBytes)})</button>` : ''}
+    <p class="cache-msg" aria-live="polite">${esc(cacheMsg)}</p>`;
+}
+
+async function change(path, body) {
+  try {
+    const r = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Dashboard': '1' },
+      body: JSON.stringify(body || {}) });
+    const out = await r.json();
+    cacheMsg = out.ok ? `${out.message}, ${bytes(out.freed)} freed.` : out.message;
+  } catch (e) { cacheMsg = 'The server didn\'t answer. Nothing was deleted.'; }
+  poll();
+}
+
 function logSection(lines) {
   $('loglines').innerHTML = lines.slice().reverse().map((l) => `<li><time>${esc(l.time)}</time><span>${esc(l.text)}</span></li>`).join('');
 }
@@ -373,6 +418,7 @@ function render(state) {
   $('network').innerHTML = networkSection(state.network);
   $('mac').innerHTML = macSection(state.server, state.phone_url);
   $('library').innerHTML = librarySection(state.library);
+  $('cache').innerHTML = cacheSection(state.cache, state.server);
   logSection(state.log || []);
 }
 
@@ -401,6 +447,16 @@ async function poll() {
 }
 
 document.addEventListener('visibilitychange', () => { if (!document.hidden) poll(); });
+document.addEventListener('click', (ev) => {
+  const del = ev.target.closest('[data-del]');
+  if (del && confirm(`Delete “${del.dataset.label}” (${del.dataset.size})? It downloads again if you play it.`)) {
+    change('/ui/api/cache/delete', { ih: del.dataset.del });
+  }
+  const clr = ev.target.closest('[data-clear]');
+  if (clr && confirm(`Delete ${clr.dataset.clear} downloaded torrents (${clr.dataset.size})? Anything playing now is kept.`)) {
+    change('/ui/api/cache/clear');
+  }
+});
 document.addEventListener('click', async (ev) => {
   const b = ev.target.closest('[data-copy]');
   if (!b) return;

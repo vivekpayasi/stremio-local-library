@@ -36,7 +36,7 @@ from pathlib import Path
 
 import libtorrent as lt
 
-from dashboard import PAGE as DASHBOARD_PAGE, Dashboard, last_tv_ip, ui_allowed
+from dashboard import PAGE as DASHBOARD_PAGE, Dashboard, last_tv_ip, ui_allowed, ui_write_allowed
 from stream_facts import FFPROBE, FactStore, Prober, ffprobe_runner
 
 HOME = Path.home()
@@ -922,6 +922,8 @@ class Engine:
             try:
                 now = time.time()
                 for t in list(self.torrents.values()):
+                    if t.live_readers():
+                        t.touch()      # 'last used' stays current during a long read (the dashboard's in-use check)
                     self.drop(t, f'unused for {CONFIG["idle_drop_s"]}s', only_if_idle=True)
                 if now - self.last_resume_save > 300:
                     self.last_resume_save = now
@@ -1037,8 +1039,13 @@ class Handler(BaseHTTPRequestHandler):
         path, q = u.path, urllib.parse.parse_qs(u.query)
         self.t0, self.sent, self.headers_sent = time.time(), 0, False
         try:
+            if path.startswith('/ui') and self.command == 'OPTIONS':
+                # A cross-origin preflight: the dashboard never allows one (and it must not reach Stremio's server).
+                return self.send_bytes(403, 'text/plain', b'')
             if path in ('/ui', '/ui/', '/ui/api/state'):
                 return self.ui(path)
+            if path in ('/ui/api/cache/delete', '/ui/api/cache/clear') and self.command == 'POST':
+                return self.ui_change(path)
             # Another device running Stremio (a phone) polls like the TV does; the one streaming wins for 10 min.
             if ((path.endswith('/stats.json') or path in REMEMBERED) and time.time() - Handler.tv_streamed_at > 600
                     and self.client_address[0] not in own_ips()):
@@ -1149,12 +1156,25 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---- dashboard
 
-    def ui(self, path):
+    @staticmethod
+    def cert_suffix():
         try:
-            domain = json.loads(Path(CONFIG['cert_file']).read_text())['domain']
-            suffix = '.' + domain.split('.', 1)[1]
+            return '.' + json.loads(Path(CONFIG['cert_file']).read_text())['domain'].split('.', 1)[1]
         except (OSError, ValueError, KeyError, IndexError):
-            suffix = None
+            return None
+
+    def ui_change(self, path):
+        body = self.body_json()
+        if not ui_write_allowed(self.client_address[0], self.headers.get('Host'), self.headers.get('Sec-Fetch-Site'),
+                                self.headers.get('X-Dashboard'), CONFIG['dashboard_lan'], own_ips(), self.cert_suffix()):
+            return self.send_bytes(403, 'application/json', b'{"ok": false, "message": "Not allowed"}')
+        if not self.dashboard:
+            return self.send_bytes(503, 'application/json', b'{"ok": false, "message": "dashboard not running"}')
+        out = self.dashboard.delete(body.get('ih')) if path.endswith('/delete') else self.dashboard.clear()
+        return self.send_bytes(200, 'application/json; charset=utf-8', json.dumps(out).encode())
+
+    def ui(self, path):
+        suffix = self.cert_suffix()
         if not ui_allowed(self.client_address[0], self.headers.get('Host'), self.headers.get('Sec-Fetch-Site'),
                           CONFIG['dashboard_lan'], own_ips(), suffix):
             body = ('<!doctype html><meta charset="utf-8"><title>Dashboard</title><p>The dashboard only opens on the Mac '
@@ -1560,6 +1580,7 @@ def main():
         sessions=engine.dashboard_sessions,
         facts=lambda key: Handler.prober.store.get(key) if Handler.prober else None,
         config=CONFIG, install_dir=INSTALL_DIR, log=log, phone_url=phone_url,
+        in_session=lambda: set(engine.torrents),
         tv_ip=lambda: Handler.tv_ip or last_tv_ip(_tail_log(), own_ips()))
     servers = []
     plain = PlainServer(('0.0.0.0', CONFIG['http_port']), Handler)

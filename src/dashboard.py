@@ -161,6 +161,85 @@ def ui_allowed(client, host, fetch_site, lan, own, cert_suffix):
     return client.startswith('127.') or bool(lan)
 
 
+def ui_write_allowed(client, host, fetch_site, marker, lan, own, cert_suffix):
+    """Whether a request may change something (delete from the cache). On top of ui_allowed: it must come from
+    the dashboard page itself — a same-origin fetch carrying the X-Dashboard header, which a form on another
+    site can't send and a cross-site script can't add without a preflight this server never answers."""
+    if marker != '1' or fetch_site not in (None, 'same-origin'):
+        return False
+    return ui_allowed(client, host, fetch_site, lan, own, cert_suffix)
+
+
+IH_DIR = re.compile(r'[0-9a-f]{40}')
+RECENT_S = 120   # used this recently = in use: after a restart, a reader takes a moment to reconnect
+
+
+def _last_used(d):
+    try:
+        return float((d / '.last-used').read_text())
+    except (OSError, ValueError):
+        return d.stat().st_mtime
+
+
+def _in_use(d, in_session):
+    return d.name in in_session or time.time() - _last_used(d) < RECENT_S
+
+
+def _usage(path):
+    total = 0
+    for root, _, files in os.walk(path):
+        for f in files:
+            try:
+                total += os.lstat(os.path.join(root, f)).st_blocks * 512
+            except OSError:
+                pass
+    return total
+
+
+def cache_entries(cache_dir, in_session, titles):
+    """Every torrent in the cache, most recently used first: its name, title, size on disk, whether it's in use."""
+    rows = []
+    try:
+        dirs = [d for d in Path(cache_dir).iterdir() if d.is_dir() and IH_DIR.fullmatch(d.name)]
+    except OSError:
+        return rows
+    for d in dirs:
+        used = _last_used(d)
+        names = sorted(p.name for p in d.iterdir() if not p.name.startswith('.'))
+        t = titles.get(d.name) or {}
+        rows.append({'ih': d.name, 'name': names[0] if names else d.name[:8], 'title': t.get('name'),
+                     'poster': t.get('poster'), 'bytes': _usage(d), 'last_used': used, 'in_use': _in_use(d, in_session)})
+    rows.sort(key=lambda r: r['last_used'], reverse=True)
+    return rows
+
+
+def delete_cached(cache_dir, ih, in_session):
+    """(deleted?, message, bytes freed). Only a torrent folder of the cache, and never one in use."""
+    if not isinstance(ih, str) or not IH_DIR.fullmatch(ih):
+        return False, 'Not a torrent in the cache', 0
+    d = Path(cache_dir) / ih
+    if not d.is_dir():
+        return False, 'Already gone', 0
+    if _in_use(d, in_session):
+        return False, 'It\'s in use. It can be deleted a few minutes after it was last read.', 0
+    freed = _usage(d)
+    shutil.rmtree(d, ignore_errors=True)
+    return not d.exists(), 'Deleted', freed
+
+
+def clear_cache(cache_dir, in_session):
+    """Delete every torrent not in use: ([deleted info hashes], bytes freed)."""
+    deleted, freed = [], 0
+    for row in cache_entries(cache_dir, in_session, {}):
+        if row['in_use']:
+            continue
+        ok, _, n = delete_cached(cache_dir, row['ih'], in_session)
+        if ok:
+            deleted.append(row['ih'])
+            freed += n
+    return deleted, freed
+
+
 EPISODE = re.compile(r'(?:\bS(\d{1,2})[ ._-]?E(\d{1,3})|\b(\d{1,2})x(\d{2,3}))', re.I)
 
 
@@ -413,8 +492,9 @@ class Dashboard:
     VIEWED_S = 60          # keep the slow collectors running this long after the last poll
 
     def __init__(self, sessions, facts, config, install_dir, log, tv_ip=lambda: None, started=None,
-                 phone_url=lambda: None):
+                 phone_url=lambda: None, in_session=lambda: set()):
         self.sessions, self.facts, self.config, self.log = sessions, facts, config, log
+        self.in_session = in_session
         self.phone_url = phone_url
         self.dir = Path(install_dir)
         self.tv_ip = tv_ip
@@ -465,6 +545,23 @@ class Dashboard:
                     pass
         self.slow['cache'] = {'used': used, 'budget': self.config['cache_budget_gb'] * 1024 * MB,
                               'free': shutil.disk_usage(cache).free}
+        self.slow['cache_list'] = cache_entries(cache, self.in_session(), self._titles())
+
+    # ---- changes, from the dashboard's buttons
+
+    def delete(self, ih):
+        ok, msg, freed = delete_cached(self.config['cache_dir'], ih, self.in_session())
+        if ok:
+            self.log(f'cache: deleted {ih[:8]} ({freed / MB:.0f} MB) from the dashboard')
+        self._cache()
+        return {'ok': ok, 'message': msg, 'freed': freed}
+
+    def clear(self):
+        deleted, freed = clear_cache(self.config['cache_dir'], self.in_session())
+        if deleted:
+            self.log(f'cache: cleared {len(deleted)} torrent(s), {freed / MB:.0f} MB, from the dashboard')
+        self._cache()
+        return {'ok': True, 'message': f'Deleted {len(deleted)} torrent(s)', 'freed': freed}
 
     def _ping(self):
         ip = self.tv_ip()
@@ -572,6 +669,7 @@ class Dashboard:
                        'cache': self.slow.get('cache'), 'learning': self.config.get('learn_from_plays')},
             'network': {'mac_wifi': self.slow.get('mac_wifi'), 'tv_ping': self.slow.get('tv_ping'), 'tv_ip': lan_ip},
             'tv': self.slow.get('tv'),
+            'cache': self.slow.get('cache_list'),
             'library': self._library_view(),
             'log': filter_log(_tail(self.dir / 'torrent.log')),
         }

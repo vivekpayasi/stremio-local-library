@@ -34,6 +34,7 @@ const DEFAULTS = {
   enabled: true,
   upstreams: [],              // [{ name, url }]: stream addons whose lists are rated, merged in this order
   sort: 'original',           // 'rating': best-rated first (stable within a rating)
+  display: 'compact',         // the TV card's text: 'compact' short lines, or 'full' (reasons above Torrentio's text)
   // Probe the top few streams nobody has played yet, through the torrent server (a few MB each), so
   // their ratings are verified next time the list is opened. Off by default: it joins those swarms.
   probe: { enabled: false, top: 3, server: 'http://127.0.0.1:11472' },
@@ -242,7 +243,7 @@ export function createAdvisor({
     }
 
     const factsFor = factsLookup(readFacts()?.facts ?? {});
-    const out = adviseStreams(all, { profile: profile(), runtimeMin: runtime, factsFor, sort: cfg.sort });
+    const out = adviseStreams(all, { profile: profile(), runtimeMin: runtime, factsFor, sort: cfg.sort, display: cfg.display });
     if (cfg.probe.enabled) probeTop(all, factsFor, cfg);
     recordTitles(all, type, id, meta);
 
