@@ -37,6 +37,7 @@ from pathlib import Path
 import libtorrent as lt
 
 from dashboard import PAGE as DASHBOARD_PAGE, Dashboard, cached_progress, last_tv_ip, ui_allowed, ui_write_allowed
+from prefetch import Prefetcher
 from stream_facts import FFPROBE, FactStore, Prober, ffprobe_runner
 
 HOME = Path.home()
@@ -394,7 +395,7 @@ class Torrent:
         self.engine, self.ih, self.handle, self.save_path = engine, ih, handle, Path(save_path)
         self.cond = threading.Condition()
         self.ti = None
-        self.readers = {}         # reader id -> {'at', 'last', 'released', 'hi', 'urgent_to'}
+        self.readers = {}         # reader id -> {'at', 'last', 'released', 'hi', 'urgent_to', 'bg', 'short'}
         self.prio = {}            # piece -> priority we set (only pieces we raised above 0)
         self.deadlines = set()    # pieces we gave a deadline
         self.piece_cache = {}     # piece -> bytes, insertion-ordered (oldest first)
@@ -446,6 +447,15 @@ class Torrent:
         fs = layout(self.ti)
         return [{'name': fs.file_name(i), 'path': fs.file_path(i), 'length': fs.file_size(i),
                  'offset': fs.file_offset(i)} for i in range(fs.num_files())]
+
+    def piece_range(self, idx):
+        """The first and last piece of a file."""
+        fs, plen = layout(self.ti), self.ti.piece_length()
+        offset, size = fs.file_offset(idx), fs.file_size(idx)
+        return offset // plen, (offset + max(size, 1) - 1) // plen
+
+    def have_piece(self, p):
+        return self.handle.have_piece(p)
 
     def ensure_file_wanted(self, idx):
         # Torrents are added with every file set to "don't download" so that metadata arriving cannot
@@ -499,14 +509,16 @@ class Torrent:
                 self.mp4_patches[idx] = patches
             return self.mp4_patches[idx]
 
-    def want(self, rid, piece, last_piece):
-        """A reader is now at `piece` and will read no further than `last_piece`."""
+    def want(self, rid, piece, last_piece, background=False):
+        """A reader is now at `piece` and will read no further than `last_piece`. A background reader is a download
+        for later (prefetch.py): it gets what no stream is asking for."""
         with self.lock:
             prev = self.readers.get(rid)
             if prev and prev['at'] == piece and prev['released'] is None:
                 return
             fresh = not self.readers
-            self.readers[rid] = {'at': piece, 'last': last_piece, 'released': None, 'hi': piece, 'urgent_to': piece}
+            self.readers[rid] = {'at': piece, 'last': last_piece, 'released': None, 'hi': piece, 'urgent_to': piece,
+                                 'bg': background, 'short': not background}
             self._apply()
             # With nothing wanted, our last announce told trackers we had nothing left to download,
             # so they answered with few or no seeds. Now that pieces are wanted, ask again.
@@ -597,6 +609,16 @@ class Torrent:
             run = 0
             while at + run <= last and run < max_n and have[at + run]:
                 run += 1
+            if r['bg']:
+                # A download for later: its whole window from the start, at the lowest priority and with no
+                # deadlines, so a stream's pieces always come first.
+                r['hi'], r['urgent_to'] = min(last, at + max_n), at - 1
+                for p in range(at, r['hi'] + 1):
+                    want.setdefault(p, 1)
+                continue
+            # Short of buffer: less than half the read-ahead is in right ahead of the reader, with more of what it
+            # asked for still to come. Downloads for later hold back meanwhile (Engine.streams_short).
+            r['short'] = at + run <= last and run < max_n // 2
             hi = min(last, at + min(max_n, start_n + 2 * run))
             urgent_to = min(hi, at + urgent_n)
             r['hi'], r['urgent_to'] = hi, urgent_to
@@ -643,7 +665,7 @@ class Torrent:
         """One file as the dashboard needs it (see dashboard.summarize_session)."""
         fs, plen = layout(self.ti), self.ti.piece_length()
         size, offset = fs.file_size(idx), fs.file_offset(idx)
-        first, last = offset // plen, (offset + max(size, 1) - 1) // plen
+        first, last = self.piece_range(idx)
         s = self.handle.status(lt.status_flags_t.query_pieces)
         try:
             peers = self.handle.get_peer_info()
@@ -680,7 +702,7 @@ class Torrent:
             missing = [i - r['at'] for i in range(r['at'], r['hi'] + 1) if not have[i]]
             readers.append({'at': r['at'], 'window': r['hi'] - r['at'] + 1, 'urgent': r['urgent_to'] - r['at'] + 1,
                             'missing_in_window': len(missing), 'first_missing': missing[:12],
-                            'released': r['released'] is not None})
+                            'released': r['released'] is not None, 'background': r['bg']})
         peers = self.handle.get_peer_info()
         lt_prios = self.handle.get_piece_priorities()
         wanted = [i for i, v in enumerate(lt_prios) if v > 0 and not have[i]]
@@ -838,6 +860,15 @@ class Engine:
             return set()
         with t.lock:
             return {i for i, n in t.reading.items() if n > 0}
+
+    def streams_short(self):
+        """Whether some stream is short of buffer right now (see Torrent._apply). Downloads for later wait until
+        none is."""
+        for t in list(self.torrents.values()):
+            with t.lock:
+                if any(r['released'] is None and not r['bg'] and r['short'] for r in t.readers.values()):
+                    return True
+        return False
 
     def offline(self, ih, fn, timeout=10):
         """Run fn() with the torrent out of the session and kept out — to edit its saved state on disk. A
@@ -1079,7 +1110,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_bytes(403, 'text/plain', b'')
             if path in ('/ui', '/ui/', '/ui/api/state'):
                 return self.ui(path)
-            if path in ('/ui/api/cache/delete', '/ui/api/cache/clear', '/ui/api/cache/delete-file') and self.command == 'POST':
+            if path in self.UI_CHANGES and self.command == 'POST':
                 return self.ui_change(path)
             # Another device running Stremio (a phone) polls like the TV does; the one streaming wins for 10 min.
             if ((path.endswith('/stats.json') or path in REMEMBERED) and time.time() - Handler.tv_streamed_at > 600
@@ -1197,6 +1228,9 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---- dashboard
 
+    UI_CHANGES = ('/ui/api/cache/delete', '/ui/api/cache/clear', '/ui/api/cache/delete-file', '/ui/api/prefetch',
+                  '/ui/api/prefetch/cancel')
+
     @staticmethod
     def cert_suffix():
         try:
@@ -1211,9 +1245,11 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_bytes(403, 'application/json', b'{"ok": false, "message": "Not allowed"}')
         if not self.dashboard:
             return self.send_bytes(503, 'application/json', b'{"ok": false, "message": "dashboard not running"}')
-        out = (self.dashboard.delete(body.get('ih')) if path.endswith('/delete')
-               else self.dashboard.delete_file(body.get('ih'), body.get('idx')) if path.endswith('/delete-file')
-               else self.dashboard.clear())
+        d, ih, idx = self.dashboard, body.get('ih'), body.get('idx')
+        out = {'/ui/api/cache/delete': lambda: d.delete(ih), '/ui/api/cache/clear': d.clear,
+               '/ui/api/cache/delete-file': lambda: d.delete_file(ih, idx),
+               '/ui/api/prefetch': lambda: d.prefetch(ih, idx),
+               '/ui/api/prefetch/cancel': lambda: d.cancel_prefetch(ih, idx)}[path]()
         return self.send_bytes(200, 'application/json; charset=utf-8', json.dumps(out).encode())
 
     def ui(self, path):
@@ -1627,7 +1663,7 @@ def main():
         facts=lambda key: Handler.prober.store.get(key) if Handler.prober else None,
         config=CONFIG, install_dir=INSTALL_DIR, log=log, phone_url=phone_url,
         in_session=lambda: set(engine.torrents), live_progress=engine.file_progress,
-        busy_files=engine.busy_files, offline=engine.offline,
+        busy_files=engine.busy_files, offline=engine.offline, prefetch=Prefetcher(engine, log),
         tv_ip=lambda: Handler.tv_ip or last_tv_ip(_tail_log(), own_ips()))
     servers = []
     plain = PlainServer(('0.0.0.0', CONFIG['http_port']), Handler)

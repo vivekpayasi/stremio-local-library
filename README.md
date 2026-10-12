@@ -213,6 +213,13 @@ Settings in `advisor.json`:
 - **Downloaded torrents** — everything in the torrent cache, newest first, with its size and when it was last
   used. Delete one, or everything not in use, to free disk space. Whatever is playing, or was read in the last
   two minutes, can't be deleted.
+- **Download next episode** — under a season pack that is playing, was played, or is in the cache: the
+  episode after it in the same pack, with a button to download it to this Mac for later, so it plays from the
+  Mac (and the TV's stream card shows it as downloaded). One file at a time, in the order asked, at the lowest
+  priority — it pauses whenever a stream is short of buffer, so it never takes bandwidth the TV needs, and
+  it stays within the download limit. It is refused when the file wouldn't fit on disk; if it would take the
+  cache past its budget, the oldest downloads not in use make room. Cancel keeps what has arrived, and asking
+  again carries on from there (also after a restart of the torrent server).
 
 The status line at the top says in one sentence whether things are fine and, if not, why. The page works
 on a phone: it shows what is being watched, so by default only this Mac can open it. To open it from other

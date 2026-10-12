@@ -175,6 +175,11 @@ VIDEO = re.compile(r'\.(mkv|mp4|m4v|avi|mov|ts|m2ts|mts|webm|wmv|mpg)$', re.I)
 RECENT_S = 120   # used this recently = in use: after a restart, a reader takes a moment to reconnect
 
 
+def _file_ref(ih, idx):
+    """Whether (ih, idx) from a request names a file of a torrent: a cache folder's hash and a file index."""
+    return isinstance(ih, str) and bool(IH_DIR.fullmatch(ih)) and isinstance(idx, int) and not isinstance(idx, bool)
+
+
 def _last_used(d):
     try:
         return float((d / '.last-used').read_text())
@@ -279,7 +284,8 @@ def cache_entries(cache_dir, in_session, titles, live_progress=None, busy_files=
                      # Videos only (not the .nfo or poster that come along), at least 1% in (not a piece shared
                      # with the neighbouring episode), most complete first.
                      'files': sorted((f for f in files if f['done'] >= 0.01 and VIDEO.search(f['name'])),
-                                     key=lambda f: -f['done'])[:6]})
+                                     key=lambda f: -f['done'])[:6],
+                     'next': next_episode(files)})
     rows.sort(key=lambda r: r['last_used'], reverse=True)
     return rows
 
@@ -375,6 +381,39 @@ def clear_cache(cache_dir, in_session):
 
 
 EPISODE = re.compile(r'(?:\bS(\d{1,2})[ ._-]?E(\d{1,3})|\b(\d{1,2})x(\d{2,3}))', re.I)
+
+
+SAMPLE = re.compile(r'\bsample\b', re.I)
+
+
+def episode_label(name):
+    """'S01E03' for a file name with an episode code, else the name."""
+    m = EPISODE.search(name or '')
+    return f'S{int(m.group(1) or m.group(3)):02d}E{int(m.group(2) or m.group(4)):02d}' if m else name
+
+
+def next_episode(files, current_idx=None):
+    """The file of a season pack to download for later: {idx, label, name, length, done} of the episode after the
+    one at `current_idx` — or, with none given, after the furthest episode with data. None at the end of the pack,
+    or when the file names carry no episode codes. `files` as resume_progress lists them."""
+    episodes = {}
+    for f in files:
+        m = EPISODE.search(f['name'])
+        if not m or not VIDEO.search(f['name']) or SAMPLE.search(f['name']):
+            continue
+        key = (int(m.group(1) or m.group(3)), int(m.group(2) or m.group(4)))
+        if key not in episodes or f['length'] > episodes[key]['length']:   # two copies of one episode: the bigger
+            episodes[key] = f
+    if current_idx is None:
+        started = [k for k, f in episodes.items() if f['done'] >= 0.01]
+        current = max(started, default=None)
+    else:
+        current = next((k for k, f in episodes.items() if f['idx'] == current_idx), None)
+    later = sorted(k for k in episodes if current is not None and k > current)
+    if not later:
+        return None
+    f = episodes[later[0]]
+    return {'idx': f['idx'], 'label': episode_label(f['name']), 'name': f['name'], 'length': f['length'], 'done': f['done']}
 
 
 def title_for(titles, ih, idx, file_name):
@@ -626,8 +665,10 @@ class Dashboard:
     VIEWED_S = 60          # keep the slow collectors running this long after the last poll
 
     def __init__(self, sessions, facts, config, install_dir, log, tv_ip=lambda: None, started=None,
-                 phone_url=lambda: None, in_session=lambda: set(), live_progress=None, busy_files=None, offline=None):
+                 phone_url=lambda: None, in_session=lambda: set(), live_progress=None, busy_files=None, offline=None,
+                 prefetch=None):
         self.sessions, self.facts, self.config, self.log = sessions, facts, config, log
+        self.prefetcher = prefetch      # prefetch.Prefetcher: downloads for later
         self.in_session, self.live_progress = in_session, live_progress
         self.busy_files = busy_files    # ih -> {file index being read}, for torrents in the session
         self.offline = offline          # (ih, fn) -> fn()'s result with the torrent out of the session, or None if busy
@@ -696,7 +737,7 @@ class Dashboard:
         """Delete one episode of a cached season pack, unless something in that torrent is being read."""
         def no(message):
             return {'ok': False, 'message': message, 'freed': 0}
-        if not isinstance(idx, int) or isinstance(idx, bool) or not isinstance(ih, str) or not IH_DIR.fullmatch(ih):
+        if not _file_ref(ih, idx):
             return no('Not a file in the cache')
         busy = self.busy_files(ih) if self.busy_files and ih in self.in_session() else set()
         if idx in busy:
@@ -719,6 +760,38 @@ class Dashboard:
             self.log(f'cache: cleared {len(deleted)} torrent(s), {freed / MB:.0f} MB, from the dashboard')
         self._cache()
         return {'ok': True, 'message': f'Deleted {len(deleted)} torrent(s)', 'freed': freed}
+
+    def _files(self, ih):
+        """[{idx, name, length, done}] for each file of a cached torrent: live while it's in the session."""
+        files = self.live_progress(ih) if self.live_progress and ih in self.in_session() else None
+        return files or resume_progress(Path(self.config['cache_dir']) / ih / '.resume')
+
+    def prefetch(self, ih, idx):
+        """Download one file of a cached torrent for later — the next episode of a season pack — if it fits on disk."""
+        def no(message):
+            return {'ok': False, 'message': message}
+        if not self.prefetcher:
+            return no('Downloads for later are off')
+        f = next((f for f in self._files(ih) if f['idx'] == idx), None) if _file_ref(ih, idx) else None
+        if not f:
+            return no('Not a file in the cache')
+        label = episode_label(f['name'])
+        if f['done'] >= 1:
+            return no(f'{label} is already on this Mac')
+        need = f['length'] * (1 - f['done'])
+        keep = self.config.get('min_free_gb', 3) * 1024 * MB
+        free = shutil.disk_usage(self.config['cache_dir']).free
+        if need > free - keep:
+            return no(f'Not enough free disk space: {label} needs {need / 1024 / MB:.1f} GB more, and only '
+                      f'{max(0, free - keep) / 1024 / MB:.1f} GB can be used ({keep / 1024 / MB:.0f} GB is kept free)')
+        ok, message = self.prefetcher.start(ih, idx, label)
+        return {'ok': ok, 'message': message}
+
+    def cancel_prefetch(self, ih, idx):
+        if not self.prefetcher or not _file_ref(ih, idx):
+            return {'ok': False, 'message': 'Nothing is downloading for that file'}
+        ok, message = self.prefetcher.cancel(ih, idx)
+        return {'ok': ok, 'message': message}
 
     def _ping(self):
         ip = self.tv_ip()
@@ -815,18 +888,22 @@ class Dashboard:
                 while h and now - h[0][0] > 600:
                     h.popleft()
         out.sort(key=lambda s: (not s['live'], -s['pos_at'] if s['live'] else s['ended_ago_s'] or 0))
+        out = out[:4]
+        for s in out:
+            s['next'] = next_episode(self._files(s['ih']), s['idx'])
         lan_ip = (self.slow.get('tv_ping') or {}).get('ip')
         return {
             'now': now,
             'phone_url': self.phone_url() if self.config.get('dashboard_lan') else None,
             'health': health(out[0] if out and out[0]['live'] else None, self.slow.get('tv_ping')),
-            'sessions': out[:4],
+            'sessions': out,
             'server': {**(self.slow.get('process') or {}), 'uptime_s': round(now - self.started),
                        'download_cap_mbps': self.config.get('download_limit_mbps'),
                        'cache': self.slow.get('cache'), 'learning': self.config.get('learn_from_plays')},
             'network': {'mac_wifi': self.slow.get('mac_wifi'), 'tv_ping': self.slow.get('tv_ping'), 'tv_ip': lan_ip},
             'tv': self.slow.get('tv'),
             'cache': self.slow.get('cache_list'),
+            'prefetch': self.prefetcher.jobs() if self.prefetcher else [],
             'library': self._library_view(),
             'log': filter_log(_tail(self.dir / 'torrent.log')),
         }

@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'src'))
 
 from dashboard import (Dashboard, account_status, bdecode, bencode, cache_entries, cached_progress,  # noqa: E402
                        classify_requests, clear_cache, delete_file_cached,
-                       delete_cached, resume_progress, filter_log, health, last_tv_ip, parse_mac_wifi, parse_ping, parse_tv_snapshot,
+                       delete_cached, resume_progress, filter_log, health, last_tv_ip, next_episode, parse_mac_wifi, parse_ping, parse_tv_snapshot,
                        piece_strip, summarize_session, title_for, ui_allowed, ui_write_allowed)
 
 MB = 1024 * 1024
@@ -591,6 +591,149 @@ class CachedProgress(unittest.TestCase):
                                    live_progress=lambda ih: [{'name': 'E01.mkv', 'length': 8 * MB, 'done': 0.5},
                                                              {'name': 'E02.mkv', 'length': 6 * MB, 'done': 0.004}])
             self.assertEqual(live, {'a' * 40: {'0': 0.5}})
+
+
+class NextEpisode(unittest.TestCase):
+    # The Accid Chernobyl pack as libtorrent lists it: the file indexes are not in episode order.
+    PACK = [{'idx': 0, 'name': 'Chernobyl - S01E02 - Please Remain Calm (2160p DV HDR x265) [Accid].mkv', 'length': 7496392621, 'done': 1.0},
+            {'idx': 1, 'name': 'Chernobyl - S01E01 - 1.23.45 (2160p DV HDR x265) [Accid].mkv', 'length': 7220830838, 'done': 0.0},
+            {'idx': 2, 'name': 'Chernobyl - S01E03 - Open Wide, O Earth (2160p DV HDR x265) [Accid].mkv', 'length': 4041118984, 'done': 0.0},
+            {'idx': 3, 'name': 'Chernobyl - S01E04 - The Happiness of All Mankind (2160p DV HDR x265) [Accid].mkv', 'length': 6880924528, 'done': 0.0},
+            {'idx': 4, 'name': 'Chernobyl - S01E05 - Vichnaya Pamyat (2160p DV HDR x265) [Accid].mkv', 'length': 6880924528, 'done': 0.0}]
+
+    def test_the_episode_after_the_one_playing(self):
+        self.assertEqual(next_episode(self.PACK, 0), {
+            'idx': 2, 'label': 'S01E03', 'name': 'Chernobyl - S01E03 - Open Wide, O Earth (2160p DV HDR x265) [Accid].mkv',
+            'length': 4041118984, 'done': 0.0})
+        self.assertEqual(next_episode(self.PACK, 1)['label'], 'S01E02', 'E01 is followed by E02, whatever its index')
+
+    def test_nothing_after_the_last_episode(self):
+        self.assertIsNone(next_episode(self.PACK, 4))
+
+    def test_a_season_ends_and_the_next_one_begins(self):
+        files = [{'idx': 0, 'name': 'Show.S01E10.mkv', 'length': 900 * MB, 'done': 1.0},
+                 {'idx': 1, 'name': 'Show.S02E01.mkv', 'length': 900 * MB, 'done': 0.0},
+                 {'idx': 2, 'name': 'Show.S02E02.mkv', 'length': 900 * MB, 'done': 0.0}]
+        self.assertEqual(next_episode(files, 0)['idx'], 1)
+
+    def test_without_a_file_playing_it_follows_the_furthest_episode_with_data(self):
+        self.assertEqual(next_episode(self.PACK)['label'], 'S01E03', 'E02 is downloaded, E01 is not')
+        pack = [dict(f, done=0.5) if f['idx'] == 2 else dict(f, done=0.004) if f['idx'] == 3 else f for f in self.PACK]
+        self.assertEqual(next_episode(pack)['label'], 'S01E04', 'E03 is half in; a sliver of E04 shared with E03 is not a start')
+        self.assertIsNone(next_episode([dict(f, done=0.0) for f in self.PACK]), 'nothing downloaded, nothing to follow')
+
+    def test_samples_extras_and_duplicates(self):
+        files = [{'idx': 0, 'name': 'Show.S01E01.1080p.mkv', 'length': 900 * MB, 'done': 1.0},
+                 {'idx': 1, 'name': 'Show.S01E02.sample.mkv', 'length': 40 * MB, 'done': 0.0},
+                 {'idx': 2, 'name': 'Show.S01E02.nfo', 'length': 2000, 'done': 0.0},
+                 {'idx': 3, 'name': 'Show.S01E02.720p.mkv', 'length': 500 * MB, 'done': 0.0},
+                 {'idx': 4, 'name': 'Show.S01E02.1080p.mkv', 'length': 900 * MB, 'done': 0.0}]
+        self.assertEqual(next_episode(files, 0)['idx'], 4, 'the full-size video, not the sample, the .nfo or a smaller copy')
+
+    def test_other_episode_codes(self):
+        files = [{'idx': 0, 'name': 'Show 1x09.mkv', 'length': 900 * MB, 'done': 1.0},
+                 {'idx': 1, 'name': 'Show 1x10.mkv', 'length': 900 * MB, 'done': 0.0}]
+        self.assertEqual(next_episode(files, 0)['label'], 'S01E10')
+
+    def test_a_movie_or_a_file_without_an_episode_code(self):
+        files = [{'idx': 0, 'name': 'Movie.2019.2160p.mkv', 'length': 9000 * MB, 'done': 1.0},
+                 {'idx': 1, 'name': 'Movie.2019.Extras.mkv', 'length': 900 * MB, 'done': 0.0}]
+        self.assertIsNone(next_episode(files, 0))
+        self.assertIsNone(next_episode(files))
+        self.assertIsNone(next_episode(self.PACK, 9), 'a file index the pack does not have')
+        self.assertIsNone(next_episode([], None))
+
+
+class FakePrefetcher:
+    """Stands in for prefetch.Prefetcher: records what the dashboard asks it to do."""
+    def __init__(self, jobs=()):
+        self.started, self.cancelled, self.listed = [], [], list(jobs)
+
+    def start(self, ih, idx, label=None):
+        self.started.append((ih, idx, label))
+        return True, f'Downloading {label} for later'
+
+    def cancel(self, ih, idx):
+        self.cancelled.append((ih, idx))
+        return True, 'Stopped'
+
+    def jobs(self):
+        return self.listed
+
+
+class DownloadForLater(unittest.TestCase):
+    # A pack listed out of episode order, 4 MB pieces: E02 = pieces 0-1 (downloaded), E01 = pieces 2-3, E03 = pieces 4-5.
+    IH = 'b02c69e9c46feb40c23c10f785e31c673291240a'
+    INFO = {'name': 'Show S01', 'piece length': 4 * MB,
+            'files': [{'length': 8 * MB, 'path': ['Show.S01E02.mkv']}, {'length': 8 * MB, 'path': ['Show.S01E01.mkv']},
+                      {'length': 8 * MB, 'path': ['Show.S01E03.mkv']}]}
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        (self.dir / self.IH / 'Show S01').mkdir(parents=True)
+        (self.dir / self.IH / '.resume').write_bytes(benc({'info': self.INFO, 'pieces': bytes([0b11000000])}))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def dash(self, prefetch=None, in_session=(), live=None, sessions=(), **config):
+        return Dashboard(sessions=lambda: list(sessions), facts=lambda k: None, install_dir=self.tmp.name, log=lambda *a: None,
+                         config=dict({'cache_dir': str(self.dir), 'cache_budget_gb': 15, 'min_free_gb': 3}, **config),
+                         in_session=lambda: set(in_session), live_progress=live or (lambda ih: None), prefetch=prefetch)
+
+    def test_the_file_is_queued_under_its_episode_code(self):
+        p = FakePrefetcher()
+        out = self.dash(p).prefetch(self.IH, 2)
+        self.assertTrue(out['ok'], out)
+        self.assertEqual(p.started, [(self.IH, 2, 'S01E03')])
+
+    def test_what_is_refused(self):
+        p = FakePrefetcher()
+        d = self.dash(p)
+        for ih, idx in (('../x', 2), (self.IH, '2'), (self.IH, True), (self.IH, 7), ('c' * 40, 0)):
+            out = d.prefetch(ih, idx)
+            self.assertFalse(out['ok'], (ih, idx))
+        out = d.prefetch(self.IH, 0)
+        self.assertFalse(out['ok'])
+        self.assertIn('already on this Mac', out['message'])
+        out = self.dash(p, min_free_gb=10 ** 9).prefetch(self.IH, 2)
+        self.assertFalse(out['ok'], 'the disk would fill past what is kept free')
+        self.assertIn('free', out['message'])
+        self.assertEqual(p.started, [])
+        self.assertFalse(self.dash(None).prefetch(self.IH, 2)['ok'], 'no prefetcher, no downloads')
+
+    def test_a_torrent_in_the_session_is_judged_on_its_live_progress(self):
+        live = lambda ih: [{'idx': 0, 'name': 'Show.S01E02.mkv', 'length': 8 * MB, 'done': 1.0},  # noqa: E731
+                           {'idx': 1, 'name': 'Show.S01E01.mkv', 'length': 8 * MB, 'done': 0.0},
+                           {'idx': 2, 'name': 'Show.S01E03.mkv', 'length': 8 * MB, 'done': 1.0}]
+        out = self.dash(FakePrefetcher(), in_session={self.IH}, live=live).prefetch(self.IH, 2)
+        self.assertFalse(out['ok'])
+        self.assertIn('S01E03 is already on this Mac', out['message'])
+
+    def test_cancel_goes_to_the_prefetcher(self):
+        p = FakePrefetcher()
+        out = self.dash(p).cancel_prefetch(self.IH, 2)
+        self.assertTrue(out['ok'])
+        self.assertEqual(p.cancelled, [(self.IH, 2)])
+        self.assertFalse(self.dash(p).cancel_prefetch('../x', 2)['ok'])
+
+    def test_the_state_carries_the_jobs_and_each_session_s_next_episode(self):
+        import time as _t
+        job = {'ih': self.IH, 'idx': 2, 'label': 'S01E03', 'state': 'downloading', 'done': 0.25, 'length': 8 * MB,
+               'message': None, 'mbps': 21.0, 'eta_s': 3}
+        snap = dict(SNAP, ih=self.IH, idx=0, file='Show.S01E02.mkv', size=8 * MB, file_offset=0, pos_at=_t.time())
+        state = self.dash(FakePrefetcher([job]), sessions=[snap]).state()
+        self.assertEqual(state['prefetch'], [job])
+        self.assertEqual(state['sessions'][0]['next'],
+                         {'idx': 2, 'label': 'S01E03', 'name': 'Show.S01E03.mkv', 'length': 8 * MB, 'done': 0.0})
+        self.assertEqual(self.dash().state()['prefetch'], [])
+
+    def test_a_season_pack_row_offers_the_episode_after_the_furthest_one_downloaded(self):
+        row = cache_entries(self.dir, set(), {})[0]
+        self.assertEqual(row['next']['label'], 'S01E03')
+        self.assertEqual(row['next']['idx'], 2)
 
 
 class TvAddress(unittest.TestCase):

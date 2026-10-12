@@ -91,7 +91,23 @@ h1, h2, p, dl, dd, ol, ul, figure { margin: 0; }
 .empty .sub { margin-top: 16px; font-size: 13px; color: var(--muted); }
 .earlier { list-style: none; padding: 0; margin-top: 4px; }
 .earlier li { padding: 8px 0; border-top: 1px solid var(--rule); font-size: 14px; display: flex; gap: 12px; justify-content: space-between; }
-.earlier li span:last-child { color: var(--muted); white-space: nowrap; }
+.earlier li > span:last-child { color: var(--muted); white-space: nowrap; }
+
+/* the episode after this one, to download for later */
+.next { display: grid; grid-template-columns: 1fr auto; gap: 4px 12px; align-items: center; margin-top: 16px; padding-top: 12px;
+  border-top: 1px solid var(--rule); font-size: 14px; }
+.next p { font-variant-numeric: tabular-nums; }
+.next .q, .c-files .q { display: block; color: var(--muted); font-size: 13px; }
+.next .bar, .c-files .bar { display: block; height: 4px; border-radius: 2px; background: var(--track); overflow: hidden; margin-top: 3px; max-width: 280px; }
+.next .bar b, .c-files .bar b { display: block; height: 100%; background: var(--have); border-radius: 2px; }
+.next .bar { grid-column: 1; }
+.next button { grid-column: 2; grid-row: 1 / span 2; }
+.next .msg { grid-column: 1 / -1; color: var(--ink-2); font-size: 13px; }
+.earlier .next, .cache-list .next { margin-top: 6px; padding-top: 0; border-top: 0; font-size: 13px; color: var(--ink-2); }
+button.get { font: inherit; font-size: 14px; min-height: 40px; padding: 6px 14px; border-radius: 8px; cursor: pointer;
+  background: transparent; color: var(--have); border: 1px solid var(--rule); white-space: nowrap; }
+button.get:hover { border-color: var(--have); }
+button.get.small { min-height: 36px; padding: 2px 12px; font-size: 13px; }
 
 /* the quieter sections */
 .grid { display: grid; grid-template-columns: 1fr; gap: 0 32px; margin-top: 8px; }
@@ -123,8 +139,6 @@ dl.kv dd .q { color: var(--muted); }
 .c-files .bar { grid-column: 1; }
 .c-files .f-act { grid-column: 2; grid-row: 1 / span 2; }
 button.del.small { min-height: 36px; padding: 2px 12px; font-size: 13px; }
-.c-files .bar { display: block; height: 4px; border-radius: 2px; background: var(--track); overflow: hidden; margin-top: 3px; max-width: 280px; }
-.c-files .bar b { display: block; height: 100%; background: var(--have); border-radius: 2px; }
 button.del, button.clear { font: inherit; font-size: 14px; min-height: 40px; padding: 6px 14px; border-radius: 8px; cursor: pointer;
   background: transparent; color: var(--bad); border: 1px solid var(--rule); }
 button.clear { width: 100%; }
@@ -277,7 +291,7 @@ function nowPlaying(state) {
     $('now').innerHTML = `<h1>Start something on the TV</h1>
       <p>It shows up here within a couple of seconds, with how much is buffered and, if it stalls, why.</p>
       ${earlier.length ? '<p class="sub">Played earlier</p>' : ''}
-      ${earlier.length ? `<ul class="earlier">${earlier.map((e) => `<li><span>${esc(e.title)}${e.subtitle ? `, ${esc(e.subtitle.toLowerCase())}` : ''}</span><span>${ago(e.ended_ago_s)}</span></li>`).join('')}</ul>` : ''}`;
+      ${earlier.length ? `<ul class="earlier">${earlier.map((e) => `<li><div><span>${esc(e.title)}${e.subtitle ? `, ${esc(e.subtitle.toLowerCase())}` : ''}</span>${nextLine(e.ih, e.next)}</div><span>${ago(e.ended_ago_s)}</span></li>`).join('')}</ul>` : ''}`;
     sparkData = null;
     return;
   }
@@ -301,11 +315,47 @@ function nowPlaying(state) {
     <ul class="chips" aria-label="What the file contains">${s.chips.map((c) => `<li>${esc(c)}</li>`).join('')}
       <li class="proof">${s.verified ? 'Read from the file itself' : 'Guessed from the file name'}</li></ul>
     ${s.mp4_fix ? `<p class="fix">${esc(s.mp4_fix)}.</p>` : ''}
+    ${nextLine(s.ih, s.next)}
     ${s.events.length ? `<ol class="events" aria-label="Recent seeks and stalls">${s.events.map((e) => `
       <li><span aria-hidden="true">${EVENT_MARK[e.kind] || '•'}</span>
         <span>${esc(e.text)}${e.cause ? `<span class="why">${esc(CAUSE[e.cause] || e.cause)}</span>` : ''}</span>
         <time>${ago(state.now - e.at)}</time></li>`).join('')}</ol>` : ''}`;
   hookSpark();
+}
+
+// ------------------------------------------------------------------ downloads for later
+
+let JOBS = new Map();                    // 'ih:idx' -> the server's prefetch job
+const prefetchMsg = {};                  // 'ih:idx' -> why the last request for it was refused
+const ACTIVE = ['queued', 'starting', 'downloading', 'waiting'];
+const active = (j) => j && ACTIVE.includes(j.state);
+
+function jobDetail(j) {
+  if (j.state === 'queued') return 'Queued after the current download';
+  if (j.state === 'starting') return 'Starting';
+  if (j.state === 'waiting') return 'Waiting while the TV buffers';
+  return [j.mbps != null ? `${nf.format(j.mbps)} Mbps` : null, j.eta_s != null ? `about ${span(j.eta_s)} left` : null,
+    j.message].filter(Boolean).join(' · ');
+}
+
+const bar = (done, what) => `<span class="bar" role="img" aria-label="${Math.floor(done * 100)}% ${what}"><b style="width:${(done * 100).toFixed(1)}%"></b></span>`;
+
+// The episode after `next.idx`'s predecessor: a button to download it, its download under way, or that it's here.
+function nextLine(ih, n) {
+  if (!n) return '';
+  const key = `${ih}:${n.idx}`, j = JOBS.get(key), msg = prefetchMsg[key];
+  const note = msg ? `<p class="msg" aria-live="polite">${esc(msg)}</p>` : '';
+  if (active(j)) {
+    const d = jobDetail(j);
+    return `<div class="next"><p>Downloading ${esc(n.label)} for later: ${Math.floor(j.done * 100)}%${d ? `<span class="q">${esc(d)}</span>` : ''}</p>
+      <button class="get small" type="button" data-cancel="${esc(ih)}" data-idx="${Number(n.idx)}">Cancel</button>${bar(j.done, 'downloaded')}${note}</div>`;
+  }
+  if (n.done >= 1 || (j && j.state === 'done')) return `<div class="next"><p>${lv('good', `${n.label} is on this Mac`)}</p></div>`;
+  const left = n.length * (1 - n.done);
+  const size = n.done >= 0.01 ? `${bytes(left)} to go, ${Math.floor(n.done * 100)}% is here` : bytes(n.length);
+  const failed = j && j.state === 'failed' ? `<p class="msg">The last try stopped: ${esc(j.message || 'unknown error')}</p>` : '';
+  return `<div class="next"><p>Next: ${esc(n.label)}<span class="q">${esc(size)}</span></p>
+    <button class="get" type="button" data-get="${esc(ih)}" data-idx="${Number(n.idx)}" data-label="${esc(n.label)}" data-left="${Math.round(left)}">${n.done >= 0.01 ? 'Download the rest' : 'Download for later'}</button>${failed}${note}</div>`;
 }
 
 // ------------------------------------------------------------------ the quieter sections
@@ -387,7 +437,7 @@ function fileLabel(name) {
   return base.length > 42 ? `${base.slice(0, 40)}…` : base;
 }
 
-function cacheSection(rows, srv) {
+function cacheSection(rows, srv, state) {
   const h = '<h2 id="cache-h">Downloaded torrents</h2>';
   if (!rows) return `${h}<p class="lead">Reading the cache…</p>`;
   const budget = srv && srv.cache ? ` Beyond ${bytes(srv.cache.budget)}, the oldest are deleted automatically.` : '';
@@ -396,17 +446,27 @@ function cacheSection(rows, srv) {
   const now = Date.now() / 1000;
   if (!rows.length) return `${h}<p class="lead">Nothing is stored. Torrents you play are kept here for rewinds and re-watching.</p>`;
   return `${h}<p class="lead">Kept on this Mac for rewinds and re-watching.${budget}</p>
-    <ul class="cache-list">${rows.map((r) => { const many = (r.files || []).length > 1; return `<li>
+    <ul class="cache-list">${rows.map((r) => {
+      const many = (r.files || []).length > 1;
+      const jobs = (state.prefetch || []).filter((j) => j.ih === r.ih && active(j));
+      const files = (r.files || []).filter((f) => !jobs.some((j) => j.idx === f.idx));
+      return `<li>
       <div><span class="c-title">${esc(r.title || (r.name === r.ih.slice(0, 8) ? `Unknown torrent ${r.name}` : r.name))}</span>${r.title ? `<span class="c-sub">${esc(r.name)}</span>` : ''}
-        ${(r.files || []).length ? `<ul class="c-files">${r.files.map((f) => {
+        ${files.length || jobs.length ? `<ul class="c-files">${jobs.map((j) => {
+          const d = jobDetail(j);
+          return `<li><span>${esc(j.label)}: downloading for later, ${Math.floor(j.done * 100)}% of ${bytes(j.length)}${d ? `<span class="q">${esc(d)}</span>` : ''}</span>
+            <button class="f-act get small" type="button" data-cancel="${esc(j.ih)}" data-idx="${Number(j.idx)}">Cancel</button>${bar(j.done, 'downloaded')}</li>`;
+        }).join('')}${files.map((f) => {
+          const job = JOBS.get(`${r.ih}:${f.idx}`);
+          if (job) f = Object.assign({}, f, { done: Math.max(f.done, job.done) });   // fresher than the cache list
           const pct = Math.floor(f.done * 100);
           const label = fileLabel(f.name);
           const act = !many ? '' : f.busy ? '<span class="f-act inuse">Being read</span>'
             : `<button class="f-act del small" type="button" data-delfile="${esc(r.ih)}" data-idx="${Number(f.idx)}"
                 data-label="${esc(label)}" data-size="${esc(bytes(f.length * f.done))}">Delete</button>`;
-          return `<li><span>${esc(label)}: ${pct}% of ${bytes(f.length)}</span>${act}
-            <span class="bar" role="img" aria-label="${pct}% downloaded"><b style="width:${(f.done * 100).toFixed(1)}%"></b></span></li>`;
+          return `<li><span>${esc(label)}: ${pct}% of ${bytes(f.length)}</span>${act}${bar(f.done, 'downloaded')}</li>`;
         }).join('')}</ul>` : ''}
+        ${jobs.length ? '' : nextLine(r.ih, r.next)}
         <span class="c-meta">${r.bytes ? `${bytes(r.bytes)} on disk` : 'Nothing downloaded'}, used ${ago(now - r.last_used)}</span></div>
       ${r.in_use ? '<span class="inuse">In use</span>'
         : `<button class="del" type="button" data-del="${esc(r.ih)}" data-label="${esc((r.title || r.name) + (many ? ', every file' : ''))}" data-size="${esc(bytes(r.bytes))}">${many ? 'Delete all' : 'Delete'}</button>`}
@@ -425,6 +485,17 @@ async function change(path, body) {
   poll();
 }
 
+async function prefetch(path, ih, idx) {
+  const key = `${ih}:${idx}`;
+  try {
+    const r = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Dashboard': '1' },
+      body: JSON.stringify({ ih, idx }) });
+    const out = await r.json();
+    if (out.ok) delete prefetchMsg[key]; else prefetchMsg[key] = out.message;
+  } catch (e) { prefetchMsg[key] = 'The server didn\'t answer.'; }
+  poll();
+}
+
 function logSection(lines) {
   $('loglines').innerHTML = lines.slice().reverse().map((l) => `<li><time>${esc(l.time)}</time><span>${esc(l.text)}</span></li>`).join('');
 }
@@ -433,7 +504,11 @@ function logSection(lines) {
 
 let lastOk = 0, timer = null;
 
+let STATE = null;
+
 function render(state) {
+  STATE = state;
+  JOBS = new Map((state.prefetch || []).map((j) => [`${j.ih}:${j.idx}`, j]));
   const h = state.health;
   $('mark').className = `mark lv-${h.level}`;
   $('mark').textContent = MARK[h.level];
@@ -443,7 +518,7 @@ function render(state) {
   $('network').innerHTML = networkSection(state.network);
   $('mac').innerHTML = macSection(state.server, state.phone_url);
   $('library').innerHTML = librarySection(state.library);
-  $('cache').innerHTML = cacheSection(state.cache, state.server);
+  $('cache').innerHTML = cacheSection(state.cache, state.server, state);
   logSection(state.log || []);
 }
 
@@ -481,6 +556,17 @@ document.addEventListener('click', (ev) => {
   if (one && confirm(`Delete ${one.dataset.label} (${one.dataset.size}) from this Mac? It downloads again if you play it.`)) {
     change('/ui/api/cache/delete-file', { ih: one.dataset.delfile, idx: Number(one.dataset.idx) });
   }
+  const get = ev.target.closest('[data-get]');
+  if (get) {
+    const left = Number(get.dataset.left), c = STATE && STATE.server && STATE.server.cache;
+    const over = c && c.used + left > c.budget
+      ? ` That takes the downloads past their ${bytes(c.budget)} limit, so the oldest ones not in use are deleted to make room.` : '';
+    if (confirm(`Download ${get.dataset.label} (${bytes(left)}) to this Mac for later? It downloads whenever the TV doesn't need the bandwidth.${over}`)) {
+      prefetch('/ui/api/prefetch', get.dataset.get, Number(get.dataset.idx));
+    }
+  }
+  const stop = ev.target.closest('[data-cancel]');
+  if (stop) prefetch('/ui/api/prefetch/cancel', stop.dataset.cancel, Number(stop.dataset.idx));
   const clr = ev.target.closest('[data-clear]');
   if (clr && confirm(`Delete ${clr.dataset.clear} downloaded torrents (${clr.dataset.size})? Anything playing now is kept.`)) {
     change('/ui/api/cache/clear');
