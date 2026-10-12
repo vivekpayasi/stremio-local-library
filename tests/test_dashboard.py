@@ -9,8 +9,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'src'))
 
-from dashboard import (Dashboard, account_status, cache_entries, classify_requests, clear_cache,  # noqa: E402
-                       delete_cached, filter_log, health, last_tv_ip, parse_mac_wifi, parse_ping, parse_tv_snapshot,
+from dashboard import (Dashboard, account_status, bdecode, cache_entries, classify_requests, clear_cache,  # noqa: E402
+                       delete_cached, resume_progress, filter_log, health, last_tv_ip, parse_mac_wifi, parse_ping, parse_tv_snapshot,
                        piece_strip, summarize_session, title_for, ui_allowed, ui_write_allowed)
 
 MB = 1024 * 1024
@@ -428,6 +428,71 @@ class Cache(unittest.TestCase):
         self.assertFalse(ui_write_allowed('127.0.0.1', 'localhost:11472', 'same-site', '1', **args))
         self.assertFalse(ui_write_allowed('192.168.0.57', '192.168.0.101:11472', 'same-origin', '1',
                                           **dict(args, lan=False)))
+
+
+def benc(v):
+    if isinstance(v, int):
+        return b'i%de' % v
+    if isinstance(v, bytes):
+        return b'%d:%s' % (len(v), v)
+    if isinstance(v, str):
+        return benc(v.encode())
+    if isinstance(v, list):
+        return b'l' + b''.join(benc(x) for x in v) + b'e'
+    return b'd' + b''.join(benc(k) + benc(v[k]) for k in sorted(v)) + b'e'
+
+
+class Resume(unittest.TestCase):
+    def test_bdecode(self):
+        self.assertEqual(bdecode(benc({'a': [1, b'xy'], 'b': {'c': 'd'}})), {b'a': [1, b'xy'], b'b': {b'c': b'd'}})
+
+    def test_progress_per_file_from_the_piece_bitmap(self):
+        # A two-episode pack, 4 pieces of 4 MB: E01 is pieces 0-1 (8 MB), E02 is pieces 2-3 (6 MB, the last piece short).
+        # Pieces 0, 1 and 2 are in: E01 complete, E02 at 4 of 6 MB.
+        info = {'name': 'Show S01', 'piece length': 4 * MB,
+                'files': [{'length': 8 * MB, 'path': ['Show.S01E01.mkv']}, {'length': 6 * MB, 'path': ['Show.S01E02.mkv']}]}
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / '.resume'
+            p.write_bytes(benc({'info': info, 'pieces': bytes([0b11100000])}))
+            files = resume_progress(p)
+        self.assertEqual([(f['name'], f['length']) for f in files], [('Show.S01E01.mkv', 8 * MB), ('Show.S01E02.mkv', 6 * MB)])
+        self.assertEqual([round(f['done'], 3) for f in files], [1.0, 0.667])
+
+    def test_a_single_file_torrent_and_a_missing_resume(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / '.resume'
+            p.write_bytes(benc({'info': {'name': 'Movie.mkv', 'piece length': MB, 'length': 4 * MB}, 'pieces': bytes([0b10000000])}))
+            self.assertEqual(resume_progress(p), [{'name': 'Movie.mkv', 'length': 4 * MB, 'done': 0.25}])
+            self.assertEqual(resume_progress(Path(d) / 'nope'), [])
+
+    def test_cache_rows_carry_the_files_with_data(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            t = Path(d) / ('a' * 40)
+            (t / 'Show S01').mkdir(parents=True)
+            (t / '.last-used').write_text('1000')
+            info = {'name': 'Show S01', 'piece length': 4 * MB,
+                    'files': [{'length': 8 * MB, 'path': ['Show.S01E01.mkv']}, {'length': 6 * MB, 'path': ['Show.S01E02.mkv']}]}
+            (t / '.resume').write_bytes(benc({'info': info, 'pieces': bytes([0b00100000])}))
+            row = cache_entries(d, set(), {})[0]
+            self.assertEqual([(f['name'], round(f['done'], 2)) for f in row['files']], [('Show.S01E02.mkv', 0.67)])
+            live = cache_entries(d, {'a' * 40}, {}, live_progress=lambda ih: [{'name': 'Show.S01E02.mkv', 'length': 6 * MB, 'done': 0.9}])
+            self.assertEqual(live[0]['files'][0]['done'], 0.9, 'a torrent in the session reports live progress')
+
+    def test_only_videos_that_are_really_started_are_listed_most_complete_first(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            t = Path(d) / ('a' * 40)
+            (t / 'Show S01').mkdir(parents=True)
+            progress = [{'name': 'Show.S01E01.mkv', 'length': 900 * MB, 'done': 0.003},   # a shared boundary piece
+                        {'name': 'Show.S01E02.mkv', 'length': 900 * MB, 'done': 0.62},
+                        {'name': 'Show.S01E03.mkv', 'length': 900 * MB, 'done': 1.0},
+                        {'name': 'Visit our site.url', 'length': 120, 'done': 1.0},
+                        {'name': 'poster.png', 'length': 80_000, 'done': 1.0}]
+            row = cache_entries(d, {'a' * 40}, {}, live_progress=lambda ih: progress)[0]
+            self.assertEqual([f['name'] for f in row['files']], ['Show.S01E03.mkv', 'Show.S01E02.mkv'])
 
 
 class TvAddress(unittest.TestCase):

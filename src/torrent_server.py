@@ -818,6 +818,18 @@ class Engine:
     def find(self, ih):
         return self.torrents.get(ih.lower())
 
+    def file_progress(self, ih):
+        """[{name, length, done}] for each file of a torrent in the session, live from libtorrent."""
+        t = self.torrents.get(ih)
+        if not t or t.ti is None:
+            return None
+        try:
+            done = t.handle.file_progress(lt.torrent_handle.piece_granularity)
+        except RuntimeError:
+            return None
+        return [{'name': f['name'], 'length': f['length'], 'done': round(done[i] / f['length'], 4) if f['length'] else 0}
+                for i, f in enumerate(t.files())]
+
     def dashboard_sessions(self):
         """Snapshots of every file the TV has read in a torrent still in the session."""
         out = []
@@ -1580,7 +1592,7 @@ def main():
         sessions=engine.dashboard_sessions,
         facts=lambda key: Handler.prober.store.get(key) if Handler.prober else None,
         config=CONFIG, install_dir=INSTALL_DIR, log=log, phone_url=phone_url,
-        in_session=lambda: set(engine.torrents),
+        in_session=lambda: set(engine.torrents), live_progress=engine.file_progress,
         tv_ip=lambda: Handler.tv_ip or last_tv_ip(_tail_log(), own_ips()))
     servers = []
     plain = PlainServer(('0.0.0.0', CONFIG['http_port']), Handler)

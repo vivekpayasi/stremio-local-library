@@ -171,6 +171,7 @@ def ui_write_allowed(client, host, fetch_site, marker, lan, own, cert_suffix):
 
 
 IH_DIR = re.compile(r'[0-9a-f]{40}')
+VIDEO = re.compile(r'\.(mkv|mp4|m4v|avi|mov|ts|m2ts|mts|webm|wmv|mpg)$', re.I)
 RECENT_S = 120   # used this recently = in use: after a restart, a reader takes a moment to reconnect
 
 
@@ -196,8 +197,53 @@ def _usage(path):
     return total
 
 
-def cache_entries(cache_dir, in_session, titles):
-    """Every torrent in the cache, most recently used first: its name, title, size on disk, whether it's in use."""
+def bdecode(data):
+    """Bencoded bytes (a .torrent, libtorrent resume data) -> Python values; strings stay bytes."""
+    def dec(i):
+        c = data[i:i + 1]
+        if c == b'i':
+            j = data.index(b'e', i)
+            return int(data[i + 1:j]), j + 1
+        if c in (b'l', b'd'):
+            i += 1
+            items = []
+            while data[i:i + 1] != b'e':
+                v, i = dec(i)
+                items.append(v)
+            return (items if c == b'l' else dict(zip(items[::2], items[1::2]))), i + 1
+        j = data.index(b':', i)
+        n = int(data[i:j])
+        return data[j + 1:j + 1 + n], j + 1 + n
+    return dec(0)[0]
+
+
+def resume_progress(path):
+    """[{name, length, done}] for each file of a cached torrent, from libtorrent's resume data: the torrent's
+    file list and its bitmap of downloaded pieces (one bit per piece, first piece in the high bit)."""
+    try:
+        d = bdecode(Path(path).read_bytes())
+        info, bits, plen = d[b'info'], d.get(b'pieces', b''), d[b'info'][b'piece length']
+    except (OSError, ValueError, KeyError, IndexError, TypeError):
+        return []
+    have = lambda p: p >> 3 < len(bits) and bits[p >> 3] & (0x80 >> (p & 7))  # noqa: E731
+    files = info.get(b'files') or [{b'length': info.get(b'length', 0), b'path': [info.get(b'name', b'')]}]
+    out, offset = [], 0
+    for f in files:
+        length = f[b'length']
+        done = 0
+        if length:
+            for p in range(offset // plen, (offset + length - 1) // plen + 1):
+                if have(p):
+                    done += min((p + 1) * plen, offset + length) - max(p * plen, offset)
+        out.append({'name': f[b'path'][-1].decode(errors='replace'), 'length': length,
+                    'done': round(done / length, 4) if length else 0})
+        offset += length
+    return out
+
+
+def cache_entries(cache_dir, in_session, titles, live_progress=None):
+    """Every torrent in the cache, most recently used first: its name, title, size on disk, whether it's in use,
+    and how much of each file that has any data is downloaded (live for a torrent in the session)."""
     rows = []
     try:
         dirs = [d for d in Path(cache_dir).iterdir() if d.is_dir() and IH_DIR.fullmatch(d.name)]
@@ -207,8 +253,13 @@ def cache_entries(cache_dir, in_session, titles):
         used = _last_used(d)
         names = sorted(p.name for p in d.iterdir() if not p.name.startswith('.'))
         t = titles.get(d.name) or {}
+        files = (live_progress(d.name) if live_progress and d.name in in_session else None) or resume_progress(d / '.resume')
         rows.append({'ih': d.name, 'name': names[0] if names else d.name[:8], 'title': t.get('name'),
-                     'poster': t.get('poster'), 'bytes': _usage(d), 'last_used': used, 'in_use': _in_use(d, in_session)})
+                     'poster': t.get('poster'), 'bytes': _usage(d), 'last_used': used, 'in_use': _in_use(d, in_session),
+                     # Videos only (not the .nfo or poster that come along), at least 1% in (not a piece shared
+                     # with the neighbouring episode), most complete first.
+                     'files': sorted((f for f in files if f['done'] >= 0.01 and VIDEO.search(f['name'])),
+                                     key=lambda f: -f['done'])[:6]})
     rows.sort(key=lambda r: r['last_used'], reverse=True)
     return rows
 
@@ -492,9 +543,9 @@ class Dashboard:
     VIEWED_S = 60          # keep the slow collectors running this long after the last poll
 
     def __init__(self, sessions, facts, config, install_dir, log, tv_ip=lambda: None, started=None,
-                 phone_url=lambda: None, in_session=lambda: set()):
+                 phone_url=lambda: None, in_session=lambda: set(), live_progress=None):
         self.sessions, self.facts, self.config, self.log = sessions, facts, config, log
-        self.in_session = in_session
+        self.in_session, self.live_progress = in_session, live_progress
         self.phone_url = phone_url
         self.dir = Path(install_dir)
         self.tv_ip = tv_ip
@@ -545,7 +596,7 @@ class Dashboard:
                     pass
         self.slow['cache'] = {'used': used, 'budget': self.config['cache_budget_gb'] * 1024 * MB,
                               'free': shutil.disk_usage(cache).free}
-        self.slow['cache_list'] = cache_entries(cache, self.in_session(), self._titles())
+        self.slow['cache_list'] = cache_entries(cache, self.in_session(), self._titles(), self.live_progress)
 
     # ---- changes, from the dashboard's buttons
 
