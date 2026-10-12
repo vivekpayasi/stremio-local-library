@@ -8,6 +8,7 @@ import hashlib
 import http.client
 import json
 import os
+import shutil
 import sys
 import tempfile
 import threading
@@ -239,5 +240,6 @@ print()
 print(f'{sum(ok for _, ok in results)}/{len(results)} checks passed')
 server.shutdown()
 prefetcher.stop()
+shutil.rmtree(SCRATCH, ignore_errors=True)
 sys.stdout.flush()
 os._exit(0 if all(ok for _, ok in results) else 1)
