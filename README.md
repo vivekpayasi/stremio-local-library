@@ -1,4 +1,14 @@
-# Stremio Local Library
+# Stremio Sidecar
+
+A companion for Stremio desktop on a Mac that a TV streams from. It runs beside Stremio's own streaming
+server and takes over what that server does poorly, without modifying the Stremio app:
+
+- **Local Library** — media stored on your Mac, played through Stremio's own player on the TV, with full seeking.
+- **Torrent server** — libtorrent in place of Stremio's torrent engine, for smooth playback of big 4K torrents,
+  with a cache for rewinds and re-watching, and the next episode downloaded for later.
+- **Stream Advisor** — every Torrentio stream rated 1–5 ⭐ for what your TV can actually play.
+- **Dashboard** — what's playing and how healthy the stream is, the TV, the network and the cache, on the Mac
+  or your phone.
 
 Play media stored on your Mac through **Stremio's own player** on an Android TV — with full
 seeking, which casting doesn't give you.
@@ -55,8 +65,8 @@ and your other addons are never modified. To leave the order alone, pass `pinAft
 ## Install
 
 ```bash
-git clone https://github.com/vivekpayasi/stremio-local-library.git
-cd stremio-local-library
+git clone https://github.com/vivekpayasi/stremio-sidecar.git
+cd stremio-sidecar
 ./install.sh
 ```
 

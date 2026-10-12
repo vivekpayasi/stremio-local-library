@@ -1,9 +1,9 @@
 #!/bin/bash
-# SwiftBar plugin — menu bar status for the Stremio Local Library addon and the torrent server.
+# SwiftBar plugin — menu bar status for Stremio Sidecar: the Local Library addon and the torrent server.
 # Shows whether the servers are up, and copies the URLs for the current network on click.
 #
-# <xbar.title>Stremio Local Library</xbar.title>
-# <xbar.desc>Status and URLs for the Stremio Local Library addon.</xbar.desc>
+# <xbar.title>Stremio Sidecar</xbar.title>
+# <xbar.desc>Status and URLs for Stremio Sidecar: the Local Library addon and the torrent server.</xbar.desc>
 # <swiftbar.hideAbout>true</swiftbar.hideAbout>
 # <swiftbar.hideRunInTerminal>true</swiftbar.hideRunInTerminal>
 # <swiftbar.hideDisablePlugin>true</swiftbar.hideDisablePlugin>

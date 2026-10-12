@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Stremio Local Library — uninstaller
+# Stremio Sidecar — uninstaller
 #
 set -euo pipefail
 
@@ -14,7 +14,7 @@ bold() { printf '\033[1m%s\033[0m\n' "$*"; }
 ok()   { printf '  \033[32m✓\033[0m %s\n' "$*"; }
 warn() { printf '  \033[33m!\033[0m %s\n' "$*"; }
 
-bold "Stremio Local Library — uninstaller"
+bold "Stremio Sidecar — uninstaller"
 echo
 
 # Remove the addons from the Stremio account while the code is still present to do it.

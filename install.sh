@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Stremio Local Library — installer
+# Stremio Sidecar — installer
 #
 # Serves media files from this Mac to remote Stremio clients (Android TV, phone) over HTTPS
 # with HTTP Range support, so playback has full seek. Reuses the Let's Encrypt certificate
@@ -59,7 +59,7 @@ restart_agent() { # label plist port log
   die "$label did not start listening on port $port. Check $log"
 }
 
-bold "Stremio Local Library — installer"
+bold "Stremio Sidecar — installer"
 echo
 
 # ---------------------------------------------------------------- preflight
