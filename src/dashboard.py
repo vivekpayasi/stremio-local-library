@@ -17,6 +17,8 @@ import urllib.request
 from collections import deque
 from pathlib import Path
 
+from prefetch import ACTIVE as JOB_ACTIVE
+
 MB = 1024 * 1024
 HERE = Path(__file__).resolve().parent
 PAGE = HERE / 'dashboard.html'
@@ -386,10 +388,16 @@ EPISODE = re.compile(r'(?:\bS(\d{1,2})[ ._-]?E(\d{1,3})|\b(\d{1,2})x(\d{2,3}))',
 SAMPLE = re.compile(r'\bsample\b', re.I)
 
 
+def _episode(name):
+    """(season, episode) from a file name, or None."""
+    m = EPISODE.search(name or '')
+    return (int(m.group(1) or m.group(3)), int(m.group(2) or m.group(4))) if m else None
+
+
 def episode_label(name):
     """'S01E03' for a file name with an episode code, else the name."""
-    m = EPISODE.search(name or '')
-    return f'S{int(m.group(1) or m.group(3)):02d}E{int(m.group(2) or m.group(4)):02d}' if m else name
+    k = _episode(name)
+    return f'S{k[0]:02d}E{k[1]:02d}' if k else name
 
 
 def next_episode(files, current_idx=None):
@@ -398,17 +406,16 @@ def next_episode(files, current_idx=None):
     or when the file names carry no episode codes. `files` as resume_progress lists them."""
     episodes = {}
     for f in files:
-        m = EPISODE.search(f['name'])
-        if not m or not VIDEO.search(f['name']) or SAMPLE.search(f['name']):
+        key = _episode(f['name'])
+        if not key or not VIDEO.search(f['name']) or SAMPLE.search(f['name']):
             continue
-        key = (int(m.group(1) or m.group(3)), int(m.group(2) or m.group(4)))
         if key not in episodes or f['length'] > episodes[key]['length']:   # two copies of one episode: the bigger
             episodes[key] = f
     if current_idx is None:
         started = [k for k, f in episodes.items() if f['done'] >= 0.01]
         current = max(started, default=None)
-    else:
-        current = next((k for k, f in episodes.items() if f['idx'] == current_idx), None)
+    else:       # the playing file's own episode: it may be the smaller of two copies
+        current = next((_episode(f['name']) for f in files if f['idx'] == current_idx), None)
     later = sorted(k for k in episodes if current is not None and k > current)
     if not later:
         return None
@@ -778,12 +785,27 @@ class Dashboard:
         label = episode_label(f['name'])
         if f['done'] >= 1:
             return no(f'{label} is already on this Mac')
-        need = f['length'] * (1 - f['done'])
+        def left(files, i):
+            return next((g['length'] * (1 - g['done']) for g in files if g['idx'] == i), 0)
+        gb = lambda n: f'{n / 1024 / MB:.1f} GB'  # noqa: E731
+        others = [j for j in self.prefetcher.jobs() if j['state'] in JOB_ACTIVE and (j['ih'], j['idx']) != (ih, idx)]
+        # Past the budget the cache deletes an idle torrent whole, the episode downloaded for later with it. So the
+        # torrent must fit with the rest of this file, of the files being streamed from it and of its other downloads.
+        files = self._files(ih)
+        busy = self.busy_files(ih) if self.busy_files and ih in self.in_session() else set()
+        coming = {idx} | busy | {j['idx'] for j in others if j['ih'] == ih}
+        pack = _usage(Path(self.config['cache_dir']) / ih) + sum(left(files, i) for i in coming)
+        budget = self.config['cache_budget_gb'] * 1024 * MB
+        if pack > budget:
+            return no(f'{label} would bring this torrent to {gb(pack)}, past the {gb(budget)} the cache keeps, and the cache '
+                      f'would then delete all of it. Delete the episodes you\'ve watched first.')
+        # The disk: the rest of this file and of every other download still to come.
+        need = left(files, idx) + sum(left(self._files(j['ih']), j['idx']) for j in others)
         keep = self.config.get('min_free_gb', 3) * 1024 * MB
         free = shutil.disk_usage(self.config['cache_dir']).free
         if need > free - keep:
-            return no(f'Not enough free disk space: {label} needs {need / 1024 / MB:.1f} GB more, and only '
-                      f'{max(0, free - keep) / 1024 / MB:.1f} GB can be used ({keep / 1024 / MB:.0f} GB is kept free)')
+            return no(f'Not enough free disk space: {"this and the downloads queued before it need" if others else f"{label} needs"} '
+                      f'{gb(need)}, and only {gb(max(0, free - keep))} can be used ({keep / 1024 / MB:.0f} GB is kept free)')
         ok, message = self.prefetcher.start(ih, idx, label)
         return {'ok': ok, 'message': message}
 

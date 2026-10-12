@@ -511,7 +511,7 @@ class Torrent:
 
     def want(self, rid, piece, last_piece, background=False):
         """A reader is now at `piece` and will read no further than `last_piece`. A background reader is a download
-        for later (prefetch.py): it gets what no stream is asking for."""
+        for later (prefetch.py): the lowest priority and no deadlines."""
         with self.lock:
             prev = self.readers.get(rid)
             if prev and prev['at'] == piece and prev['released'] is None:
@@ -610,8 +610,10 @@ class Torrent:
             while at + run <= last and run < max_n and have[at + run]:
                 run += 1
             if r['bg']:
-                # A download for later: its whole window from the start, at the lowest priority and with no
-                # deadlines, so a stream's pieces always come first.
+                # A download for later: its whole window from the start, at the lowest priority and with no deadlines.
+                # Sequential download picks pieces below priority 7 in file order, so this alone doesn't put a stream's
+                # read-ahead first — only its urgent part (deadlines, 7). The download also stops altogether while a
+                # stream is short of buffer (Engine.streams_short).
                 r['hi'], r['urgent_to'] = min(last, at + max_n), at - 1
                 for p in range(at, r['hi'] + 1):
                     want.setdefault(p, 1)
@@ -788,6 +790,7 @@ class Engine:
             'connection_speed': 100,
         })
         self.torrents = {}
+        self.pinned = lambda: set()   # info hashes eviction must keep: those with a download for later to finish
         self.lock = threading.RLock()
         self.running = True
         self.last_resume_save = time.time()
@@ -869,6 +872,10 @@ class Engine:
                 if any(r['released'] is None and not r['bg'] and r['short'] for r in t.readers.values()):
                     return True
         return False
+
+    def disk_low(self):
+        """Whether the disk is down to the space always kept free. Downloads for later wait until it isn't."""
+        return shutil.disk_usage(self.cache).free < CONFIG['min_free_gb'] * 1024 * MB
 
     def offline(self, ih, fn, timeout=10):
         """Run fn() with the torrent out of the session and kept out — to edit its saved state on disk. A
@@ -1034,12 +1041,13 @@ class Engine:
                 used = d.stat().st_mtime
             entries.append((used, d))
         sizes = {d: disk_usage(d) for _, d in entries}
+        pinned = self.pinned()
         total = sum(sizes.values())
         free = shutil.disk_usage(self.cache).free
         for used, d in sorted(entries):
             if total <= budget and free >= min_free:
                 break
-            if d.name in self.torrents:          # never delete what is in the session
+            if d.name in self.torrents or d.name in pinned:   # never what is in the session or still downloading for later
                 continue
             shutil.rmtree(d, ignore_errors=True)
             total -= sizes[d]
@@ -1658,12 +1666,14 @@ def main():
                                 runner=ffprobe_runner(CONFIG['ffprobe']))
     else:
         log(f'stream facts off — no ffprobe at {CONFIG["ffprobe"]}')
+    prefetcher = Prefetcher(engine, log)
+    engine.pinned = prefetcher.pinned
     Handler.dashboard = Dashboard(
         sessions=engine.dashboard_sessions,
         facts=lambda key: Handler.prober.store.get(key) if Handler.prober else None,
         config=CONFIG, install_dir=INSTALL_DIR, log=log, phone_url=phone_url,
         in_session=lambda: set(engine.torrents), live_progress=engine.file_progress,
-        busy_files=engine.busy_files, offline=engine.offline, prefetch=Prefetcher(engine, log),
+        busy_files=engine.busy_files, offline=engine.offline, prefetch=prefetcher,
         tv_ip=lambda: Handler.tv_ip or last_tv_ip(_tail_log(), own_ips()))
     servers = []
     plain = PlainServer(('0.0.0.0', CONFIG['http_port']), Handler)
@@ -1690,6 +1700,7 @@ def main():
     log('stopping: saving resume data')
     for s in servers:
         s.shutdown()
+    prefetcher.stop()
     engine.shutdown()
 
 

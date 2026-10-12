@@ -1,11 +1,12 @@
 """Downloads for later: the dashboard's "Download next episode" button. A file of a torrent is fetched into the
 cache from start to end, so it later plays from this Mac — and the TV's stream card shows it as downloaded.
 
-One file at a time, in the order asked. Its pieces are asked for in the background — the lowest priority, no
-deadlines — and not at all while a stream is short of buffer (the engine's streams_short()), so a download for
-later never takes bandwidth a stream needs. The torrent stays in the session while it runs, and the file counts as
-being read, so the dashboard won't delete it from under the download. Jobs live in memory: after a restart the
-pieces already fetched stay in the cache and asking again carries on from there.
+One file at a time, in the order asked. Its pieces are asked for in the background — priority 1 and no deadlines,
+so a stream's urgent pieces always go first — and not at all while a stream is short of buffer (the engine's
+streams_short()) or the disk is nearly full (disk_low()): a download for later doesn't take bandwidth or disk
+space a stream needs. The torrent stays in the session while it runs, the file counts as being read so the
+dashboard won't delete it, and the torrents of unfinished jobs are kept out of the cache's eviction (pinned()).
+Jobs live in memory: after a restart the pieces already fetched stay in the cache and asking again carries on.
 """
 import collections
 import threading
@@ -15,16 +16,18 @@ ACTIVE = ('queued', 'starting', 'downloading', 'waiting')
 KEEP_S = 600         # a finished or failed job stays listed this long
 RATE_S = 20          # the rate shown is over this many seconds
 METADATA_S = 60      # give up on a torrent whose details no peer sends in this long
+TOUCH_S = 30         # while waiting, mark the torrent used this often (it is dropped from the session after 180 s idle)
 
 
 class Prefetcher:
-    """`engine` is torrent_server's Engine: get(ih), find(ih), file_progress(ih), streams_short()."""
+    """`engine` is torrent_server's Engine: get(ih), find(ih), file_progress(ih), streams_short(), disk_low()."""
 
     def __init__(self, engine, log, wait_s=2.0, clock=time.time):
         self.engine, self.log, self.wait_s, self.clock = engine, log, wait_s, clock
         self.lock = threading.Condition()
         self.queue = []
         self.thread = None
+        self.stopped = False
 
     # ---- what the dashboard calls
 
@@ -58,6 +61,19 @@ class Prefetcher:
         self._progress(job)
         self.log(f'prefetch {ih[:8]}/{idx}: {job["label"]} cancelled at {job["done"]:.0%}')
         return True, f'Stopped downloading {job["label"]}'
+
+    def pinned(self):
+        """Info hashes with a job queued or running: the cache must not evict them."""
+        with self.lock:
+            return {j['ih'] for j in self.queue if j['state'] in ACTIVE}
+
+    def stop(self):
+        """At shutdown: let go of every torrent, so the engine can save and drop them."""
+        with self.lock:
+            self.stopped = True
+            for j in self.queue:
+                j['cancel'].set()
+            self.lock.notify_all()
 
     def jobs(self):
         """Each job, for the page: state, how much of the file is here, and how fast the rest is coming."""
@@ -95,6 +111,8 @@ class Prefetcher:
     def _work(self):
         while True:
             with self.lock:
+                if self.stopped:
+                    return
                 job = next((j for j in self.queue if j['state'] == 'queued'), None)
                 if job is None:
                     self.lock.wait()
@@ -103,7 +121,10 @@ class Prefetcher:
             try:
                 self._run(job)
             except Exception as e:
-                self._end(job, 'failed', f'{type(e).__name__}: {e}')
+                try:
+                    self._end(job, 'failed', f'{type(e).__name__}: {e}')
+                except Exception:
+                    pass         # the worker carries on with the next job whatever happens
 
     def _end(self, job, state, message=None):
         with self.lock:
@@ -125,6 +146,7 @@ class Prefetcher:
         rid = object()          # this job's reader, as a stream's request is one
         held = None             # the torrent whose file is marked as being read by this job
         p = last = None
+        touched = 0.0
         self.log(f'prefetch {ih[:8]}/{idx}: downloading {job["label"]} for later')
         try:
             while not cancel.is_set():
@@ -143,8 +165,9 @@ class Prefetcher:
                                 return
                             if not 0 <= idx < len(t.files()):
                                 return self._end(job, 'failed', 'The torrent has no such file')
-                            first, last = t.piece_range(idx)
-                            p = first if p is None else p
+                            # From the first piece again: whatever was done before is skipped quickly, and a
+                            # torrent added back with data missing gets it fetched again.
+                            p, last = t.piece_range(idx)
                             t.ensure_file_wanted(idx)
                             with t.lock:
                                 t.reading[idx] += 1
@@ -155,11 +178,15 @@ class Prefetcher:
                     if t.have_piece(p):
                         p += 1
                         continue
-                    if self.engine.streams_short():
+                    why = ('Waiting while the TV buffers' if self.engine.streams_short()
+                           else 'Waiting for disk space' if self.engine.disk_low() else None)
+                    if why:
                         if job['state'] != 'waiting':
                             t.release(rid)
-                        t.touch()        # not idle, so it isn't dropped while it waits
-                        self._set(job, 'waiting', 'Waiting while the TV buffers')
+                        if time.time() - touched > TOUCH_S:
+                            touched = time.time()
+                            t.touch()    # not idle, so it isn't dropped while it waits
+                        self._set(job, 'waiting', why)
                         cancel.wait(self.wait_s)
                         continue
                     self._set(job, 'downloading', t.error)

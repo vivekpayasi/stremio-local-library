@@ -326,14 +326,15 @@ function nowPlaying(state) {
 // ------------------------------------------------------------------ downloads for later
 
 let JOBS = new Map();                    // 'ih:idx' -> the server's prefetch job
-const prefetchMsg = {};                  // 'ih:idx' -> why the last request for it was refused
+const prefetchMsg = {};                  // 'ih:idx' -> {text, at}: why the last request for it was refused
 const ACTIVE = ['queued', 'starting', 'downloading', 'waiting'];
 const active = (j) => j && ACTIVE.includes(j.state);
 
 function jobDetail(j) {
   if (j.state === 'queued') return 'Queued after the current download';
   if (j.state === 'starting') return 'Starting';
-  if (j.state === 'waiting') return 'Waiting while the TV buffers';
+  if (j.state === 'waiting') return j.message || 'Waiting';
+  if (j.mbps === 0) return ['Nothing is arriving right now', j.message].filter(Boolean).join(' · ');
   return [j.mbps != null ? `${nf.format(j.mbps)} Mbps` : null, j.eta_s != null ? `about ${span(j.eta_s)} left` : null,
     j.message].filter(Boolean).join(' · ');
 }
@@ -343,8 +344,8 @@ const bar = (done, what) => `<span class="bar" role="img" aria-label="${Math.flo
 // The episode after `next.idx`'s predecessor: a button to download it, its download under way, or that it's here.
 function nextLine(ih, n) {
   if (!n) return '';
-  const key = `${ih}:${n.idx}`, j = JOBS.get(key), msg = prefetchMsg[key];
-  const note = msg ? `<p class="msg" aria-live="polite">${esc(msg)}</p>` : '';
+  const key = `${ih}:${n.idx}`, j = JOBS.get(key), m = prefetchMsg[key];
+  const note = m && Date.now() - m.at < 15000 ? `<p class="msg" aria-live="polite">${esc(m.text)}</p>` : '';
   if (active(j)) {
     const d = jobDetail(j);
     return `<div class="next"><p>Downloading ${esc(n.label)} for later: ${Math.floor(j.done * 100)}%${d ? `<span class="q">${esc(d)}</span>` : ''}</p>
@@ -491,8 +492,8 @@ async function prefetch(path, ih, idx) {
     const r = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Dashboard': '1' },
       body: JSON.stringify({ ih, idx }) });
     const out = await r.json();
-    if (out.ok) delete prefetchMsg[key]; else prefetchMsg[key] = out.message;
-  } catch (e) { prefetchMsg[key] = 'The server didn\'t answer.'; }
+    if (out.ok) delete prefetchMsg[key]; else prefetchMsg[key] = { text: out.message, at: Date.now() };
+  } catch (e) { prefetchMsg[key] = { text: 'The server didn\'t answer.', at: Date.now() }; }
   poll();
 }
 

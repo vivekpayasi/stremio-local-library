@@ -216,10 +216,11 @@ Settings in `advisor.json`:
 - **Download next episode** — under a season pack that is playing, was played, or is in the cache: the
   episode after it in the same pack, with a button to download it to this Mac for later, so it plays from the
   Mac (and the TV's stream card shows it as downloaded). One file at a time, in the order asked, at the lowest
-  priority — it pauses whenever a stream is short of buffer, so it never takes bandwidth the TV needs, and
-  it stays within the download limit. It is refused when the file wouldn't fit on disk; if it would take the
-  cache past its budget, the oldest downloads not in use make room. Cancel keeps what has arrived, and asking
-  again carries on from there (also after a restart of the torrent server).
+  priority, within the download limit. It pauses whenever a stream is short of buffer, so it doesn't take
+  bandwidth the TV needs, and whenever the disk is down to the space kept free. It is refused when it wouldn't
+  fit on disk, or when it would take the pack itself past the cache budget — the cache would then delete the
+  whole pack once idle; delete the episodes you've watched first. Older downloads not in use make room for it.
+  Cancel keeps what has arrived, and asking again carries on from there (also after a restart of the server).
 
 The status line at the top says in one sentence whether things are fine and, if not, why. The page works
 on a phone: it shows what is being watched, so by default only this Mac can open it. To open it from other

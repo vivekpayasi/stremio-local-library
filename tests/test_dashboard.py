@@ -629,6 +629,8 @@ class NextEpisode(unittest.TestCase):
                  {'idx': 3, 'name': 'Show.S01E02.720p.mkv', 'length': 500 * MB, 'done': 0.0},
                  {'idx': 4, 'name': 'Show.S01E02.1080p.mkv', 'length': 900 * MB, 'done': 0.0}]
         self.assertEqual(next_episode(files, 0)['idx'], 4, 'the full-size video, not the sample, the .nfo or a smaller copy')
+        files.append({'idx': 5, 'name': 'Show.S01E03.mkv', 'length': 900 * MB, 'done': 0.0})
+        self.assertEqual(next_episode(files, 3)['idx'], 5, 'the smaller copy of E02 playing is still E02')
 
     def test_other_episode_codes(self):
         files = [{'idx': 0, 'name': 'Show 1x09.mkv', 'length': 900 * MB, 'done': 1.0},
@@ -678,10 +680,46 @@ class DownloadForLater(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def dash(self, prefetch=None, in_session=(), live=None, sessions=(), **config):
+    def dash(self, prefetch=None, in_session=(), live=None, sessions=(), busy=(), **config):
         return Dashboard(sessions=lambda: list(sessions), facts=lambda k: None, install_dir=self.tmp.name, log=lambda *a: None,
                          config=dict({'cache_dir': str(self.dir), 'cache_budget_gb': 15, 'min_free_gb': 3}, **config),
-                         in_session=lambda: set(in_session), live_progress=live or (lambda ih: None), prefetch=prefetch)
+                         in_session=lambda: set(in_session), live_progress=live or (lambda ih: None), prefetch=prefetch,
+                         busy_files=lambda ih: set(busy))
+
+    def job(self, ih, idx, state='downloading'):
+        return {'ih': ih, 'idx': idx, 'label': 'x', 'state': state, 'done': 0.0, 'length': 0, 'message': None,
+                'mbps': None, 'eta_s': None}
+
+    def test_a_pack_that_would_outgrow_the_cache_budget_is_refused(self):
+        # Past the budget, the cache deletes an idle torrent whole — the episode just downloaded with it.
+        p = FakePrefetcher()
+        out = self.dash(p, cache_budget_gb=12 / 1024).prefetch(self.IH, 2)     # E03's 8 MB fits in 12 MB
+        self.assertTrue(out['ok'], out)
+        p = FakePrefetcher()
+        out = self.dash(p, cache_budget_gb=12 / 1024, in_session={self.IH}, busy={1}).prefetch(self.IH, 2)
+        self.assertFalse(out['ok'], 'E01 is being streamed: its 8 MB will land in the pack too')
+        self.assertIn('watched', out['message'])
+        p = FakePrefetcher([self.job(self.IH, 1, 'queued')])
+        self.assertFalse(self.dash(p, cache_budget_gb=12 / 1024).prefetch(self.IH, 2)['ok'], 'E01 is queued: same')
+        p = FakePrefetcher([self.job(self.IH, 1, 'done')])
+        self.assertTrue(self.dash(p, cache_budget_gb=12 / 1024).prefetch(self.IH, 2)['ok'], 'a finished job is in the pack already')
+        self.assertEqual(p.started, [(self.IH, 2, 'S01E03')])
+
+    def test_other_downloads_still_to_come_count_against_the_free_disk(self):
+        import shutil as _sh
+        other = 'c' * 40
+        (self.dir / other).mkdir()
+        info = {'name': 'Big.mkv', 'piece length': 4 * MB, 'length': 6 * 1024 * MB}
+        (self.dir / other / '.resume').write_bytes(benc({'info': info, 'pieces': b''}))
+        GB = 1024 * MB
+        # Leave room for 4 GB: E03 (8 MB) fits alone, not after the 6 GB still to come for the other torrent.
+        keep = (_sh.disk_usage(self.dir).free - 4 * GB) / GB
+        self.assertTrue(self.dash(FakePrefetcher(), min_free_gb=keep).prefetch(self.IH, 2)['ok'])
+        p = FakePrefetcher([self.job(other, 0)])
+        out = self.dash(p, min_free_gb=keep).prefetch(self.IH, 2)
+        self.assertFalse(out['ok'])
+        self.assertIn('free', out['message'])
+        self.assertEqual(p.started, [])
 
     def test_the_file_is_queued_under_its_episode_code(self):
         p = FakePrefetcher()

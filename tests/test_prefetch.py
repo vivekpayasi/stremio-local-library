@@ -86,6 +86,7 @@ class FakeEngine:
     def __init__(self, torrent):
         self.torrents = {IH: torrent}
         self.short = False
+        self.disk_full = False
         self.gets = 0
 
     def get(self, ih):
@@ -101,6 +102,9 @@ class FakeEngine:
 
     def streams_short(self):
         return self.short
+
+    def disk_low(self):
+        return self.disk_full
 
     def file_progress(self, ih):
         t = self.torrents.get(ih)
@@ -199,6 +203,58 @@ class Prefetch(unittest.TestCase):
         self.assertEqual(new.wanted[0], (7, 9, True), 'it carries on where it was')
         self.assertEqual(new.ensured, [1])
         self.assertEqual((old.reading[1], new.reading[1]), (0, 0))
+
+    def test_a_torrent_added_back_with_data_missing_is_checked_from_its_first_piece(self):
+        # Whatever happened to the cache while it was out (eviction), the job ends only with every piece of the file here.
+        self.t.held = {8}
+        self.p.start(IH, 1, 'S01E02')
+        self.assertTrue(until(lambda: (8, 9, True) in self.t.wanted))
+        self.t.removed = True
+        del self.engine.torrents[IH]
+        self.engine.torrents[IH] = new = FakeTorrent()
+        self.assertTrue(until(lambda: self.state() == 'done'), self.p.jobs())
+        self.assertEqual(new.wanted[0], (4, 9, True))
+        self.assertTrue({4, 5, 6, 7, 8, 9} <= new.have)
+
+    def test_the_torrents_of_unfinished_jobs_are_kept_in_the_cache(self):
+        self.t.held = {5}
+        self.p.start(IH, 1, 'S01E02')
+        self.p.start('c' * 40, 0, 'S02E01')
+        self.assertEqual(self.p.pinned(), {IH, 'c' * 40}, 'running or queued: eviction must leave them alone')
+        self.p.cancel('c' * 40, 0)
+        self.t.held = set()
+        self.assertTrue(until(lambda: self.state() == 'done'))
+        self.assertEqual(self.p.pinned(), set())
+
+    def test_it_waits_while_the_disk_is_nearly_full(self):
+        self.engine.disk_full = True
+        self.p.start(IH, 1, 'S01E02')
+        self.assertTrue(until(lambda: self.state() == 'waiting'))
+        self.assertIn('disk', self.job()['message'])
+        time.sleep(0.05)
+        self.assertEqual(self.t.have, {6}, 'nothing was fetched')
+        self.engine.disk_full = False
+        self.assertTrue(until(lambda: self.state() == 'done'))
+
+    def test_stop_lets_go_of_the_torrent(self):
+        # At shutdown: the engine is about to save and drop every torrent; the job must not hold one back.
+        self.t.held = {5}
+        self.p.start(IH, 1, 'S01E02')
+        self.assertTrue(until(lambda: (5, 9, True) in self.t.wanted))
+        self.p.stop()
+        self.assertTrue(until(lambda: not self.t.readers and self.t.reading[1] == 0))
+        gets = self.engine.gets
+        self.t.dropping = True
+        time.sleep(0.05)
+        self.assertEqual(self.engine.gets, gets, 'a torrent on its way out is not asked for again')
+
+    def test_a_failing_log_does_not_stop_later_jobs(self):
+        def log(line):
+            raise OSError('log file gone')
+        p = Prefetcher(self.engine, log, wait_s=0.01)
+        p.start(IH, 1, 'S01E02')
+        p.start(IH, 2, 'S01E03')
+        self.assertTrue(until(lambda: all(j['state'] in ('done', 'failed') for j in p.jobs())), p.jobs())
 
     def test_a_torrent_on_its_way_out_is_kept(self):
         self.t.held = {7}
