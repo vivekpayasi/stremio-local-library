@@ -264,6 +264,22 @@ def cache_entries(cache_dir, in_session, titles, live_progress=None):
     return rows
 
 
+def cached_progress(cache_dir, in_session, live_progress=None):
+    """{info hash: {file index: fraction downloaded}} for every file at least 1% on this Mac — what the advisor
+    shows on the TV's stream cards. Live for torrents in the session, from resume data for the rest."""
+    out = {}
+    try:
+        dirs = [d for d in Path(cache_dir).iterdir() if d.is_dir() and IH_DIR.fullmatch(d.name)]
+    except OSError:
+        return out
+    for d in dirs:
+        files = (live_progress(d.name) if live_progress and d.name in in_session else None) or resume_progress(d / '.resume')
+        got = {str(i): round(f['done'], 4) for i, f in enumerate(files) if f['done'] >= 0.01}
+        if got:
+            out[d.name] = got
+    return out
+
+
 def delete_cached(cache_dir, ih, in_session):
     """(deleted?, message, bytes freed). Only a torrent folder of the cache, and never one in use."""
     if not isinstance(ih, str) or not IH_DIR.fullmatch(ih):

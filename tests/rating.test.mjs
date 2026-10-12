@@ -339,6 +339,13 @@ test('compact display: ✓✓ plays and was checked in the file; the description
   assert.deepEqual(out.behaviorHints, ACCID.behaviorHints);
 });
 
+test('compact display: a stream already on the Mac says how much, under the symbol', () => {
+  const r = rate(ACCID, { profile: PROFILE, runtimeMin: 65 });
+  assert.equal(decorate(ACCID, r, { cached: 0.754 }).name, '⭐⭐⭐⭐⭐\n✓ 4k DV | HDR\n⬇ 75%');
+  assert.equal(decorate(ACCID, r, { cached: 1 }).name, '⭐⭐⭐⭐⭐\n✓ 4k DV | HDR\n⬇ 100%');
+  assert.equal(decorate(ACCID, r, { cached: null }).name, '⭐⭐⭐⭐⭐\n✓ 4k DV | HDR');
+});
+
 test('compact display: ✓ plays, judged from the release name', () => {
   assert.equal(decorate(ACCID, rate(ACCID, { profile: PROFILE, runtimeMin: 65 })).name, '⭐⭐⭐⭐⭐\n✓ 4k DV | HDR');
 });

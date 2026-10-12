@@ -299,7 +299,7 @@ function reason(r) {
  * ⚠ or ✗ stream led by the reason, and without the file-name line Torrentio adds for season packs.
  * 'full': plain stars in the name and the reasons above the upstream's full text.
  */
-export function decorate(stream, r, { style = 'compact' } = {}) {
+export function decorate(stream, r, { style = 'compact', cached = null } = {}) {
   const lines = (stream.name ?? '').split('\n');
   const rest = lines.length > 1 ? lines.slice(1).join('\n') : lines[0];
   // Torrentio marks debrid streams on the first line ("[RD+] Torrentio"): keep that tag.
@@ -324,20 +324,24 @@ export function decorate(stream, r, { style = 'compact' } = {}) {
   // then languages. The release name goes last, where the TV cuts it off first.
   const body = at === -1 ? own.filter((l) => l.trim())
     : [own[at], ...own.slice(at + 1).filter((l) => l.trim()), at > 0 ? own[0] : null];
+  // Already on this Mac (partly or wholly): it starts at once and seeks freely over what's there.
+  const onMac = cached >= 0.01 ? `\n⬇ ${Math.floor(cached * 100)}%` : '';
   return {
     ...stream,
-    name: `${stars}\n${rest ? `${sym} ${rest}` : sym}`,
+    name: `${stars}\n${rest ? `${sym} ${rest}` : sym}${onMac}`,
     [field]: [why, ...notes, ...body].filter(Boolean).join('\n'),
   };
 }
 
 /** Rate and decorate a whole list; `sort: 'rating'` puts the best first (stable within a rating). */
-export function adviseStreams(streams, { profile, runtimeMin = null, factsFor = () => null, sort = 'original', display } = {}) {
+export function adviseStreams(streams, {
+  profile, runtimeMin = null, factsFor = () => null, sort = 'original', display, cachedFor = () => null,
+} = {}) {
   const rated = streams.filter((s) => s && typeof s === 'object').map((s) => {
     // One stream this code can't read is passed through as it came, not allowed to sink the list.
     try {
       const r = rate(s, { profile, runtimeMin, facts: factsFor(s) });
-      return { s: decorate(s, r, { style: display }), stars: r.stars };
+      return { s: decorate(s, r, { style: display, cached: cachedFor(s) }), stars: r.stars };
     } catch {
       return { s, stars: 0 };
     }

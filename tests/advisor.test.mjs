@@ -34,7 +34,7 @@ const FACT_GOOD = {
   subtitles: [], mp4SubsHidden: 0,
 };
 
-function setup({ config, facts = {}, upstream = () => ({ streams: STREAMS }), collection } = {}) {
+function setup({ config, facts = {}, upstream = () => ({ streams: STREAMS }), collection, cached = {} } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'advisor-test-'));
   const files = {
     config: path.join(dir, 'advisor.json'),
@@ -58,6 +58,7 @@ function setup({ config, facts = {}, upstream = () => ({ streams: STREAMS }), co
       return typeof out === 'number' ? reply(out, {}) : reply(200, out);
     }
     if (u.includes('/torrentd/probe/')) return reply(200, { queued: true });
+    if (u.endsWith('/torrentd/cached')) return cached instanceof Error ? Promise.reject(cached) : reply(200, cached);
     throw new Error(`unexpected fetch ${u}`);
   };
   const logs = [];
@@ -246,6 +247,23 @@ test('which title each torrent belongs to is recorded for the dashboard', async 
   assert.equal(typeof titles[IH_GOOD].at, 'number');
   assert.equal(titles[`${IH_GOOD}:0`].episode, 2, 'per file too: a season pack shares its hash across episodes');
   assert.equal(titles[`${IH_BAD}:4`].episode, 2);
+  cleanup();
+});
+
+test('streams already on the Mac show how much, from the torrent server', async () => {
+  const { advisor, requests, cleanup } = setup({ config: CONFIGURED, cached: { [IH_GOOD]: { 0: 0.75 } } });
+  const { streams } = await advisor.route('/advisor/stream/movie/tt1.json');
+  assert.match(streams[1].name, /\n⬇ 75%$/u);
+  assert.doesNotMatch(streams[0].name, /⬇/);
+  assert.ok(requests.some((r) => r.url === 'http://127.0.0.1:11472/torrentd/cached'));
+  cleanup();
+});
+
+test('without the torrent server the lists still come, just without the cached line', async () => {
+  const { advisor, cleanup } = setup({ config: CONFIGURED, cached: new Error('ECONNREFUSED') });
+  const { streams } = await advisor.route('/advisor/stream/movie/tt1.json');
+  assert.equal(streams.length, 2);
+  assert.ok(streams.every((s) => !/⬇/.test(s.name)));
   cleanup();
 });
 

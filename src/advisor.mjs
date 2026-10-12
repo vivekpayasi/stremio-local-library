@@ -94,6 +94,7 @@ export function createAdvisor({
   const readFacts = watchedJson(files.facts);
   const upstreamCache = new Map();   // url -> { at, streams }
   const metas = new Map();           // imdb id -> { runtime, name, year, poster }
+  let cached = { at: 0, map: {} };   // from the torrent server: info hash -> { file index: fraction on this Mac }
   const warned = new Set();   // things said once, not on every retry
   const warnOnce = (msg) => { if (!warned.has(msg)) { warned.add(msg); log(msg); } };
 
@@ -191,6 +192,27 @@ export function createAdvisor({
 
   const factKey = (s) => `${String(s.infoHash).toLowerCase()}:${s.fileIdx ?? -1}`;
 
+  // How much of each file is already downloaded, so the TV's cards can say so. Without the torrent server the
+  // lists still come, just without it.
+  async function cachedMap(cfg) {
+    if (Date.now() - cached.at < 15_000) return cached.map;
+    let map = {};
+    try {
+      const res = await fetch(`${cfg.probe.server}/torrentd/cached`, { signal: AbortSignal.timeout(1500) });
+      if (res.ok) map = (await res.json()) ?? {};
+    } catch { /* torrent server not running */ }
+    cached = { at: Date.now(), map };
+    return map;
+  }
+
+  const cachedLookup = (map) => (s) => {
+    const files = s?.infoHash ? map[String(s.infoHash).toLowerCase()] : null;
+    if (!files) return null;
+    if (Number.isInteger(s.fileIdx)) return files[String(s.fileIdx)] ?? null;
+    const all = Object.values(files);
+    return all.length === 1 ? all[0] : null;
+  };
+
   // Facts for each stream. Without a fileIdx the TV plays whichever file the server picks, which is the
   // one probed — so when exactly one file of that torrent is known, it is that one.
   function factsLookup(facts) {
@@ -222,10 +244,11 @@ export function createAdvisor({
     const cfg = config();
     const t0 = Date.now();
     const imdb = id.split(':')[0];
-    const [lists, meta] = await Promise.all([
+    const [lists, meta, onMac] = await Promise.all([
       Promise.all(cfg.upstreams.map((u) => upstreamStreams(u, type, id, cfg.cacheMinutes * 60_000)
         .then((streams) => ({ u, streams }), (error) => ({ u, error })))),
       metaFor(type, imdb),
+      cachedMap(cfg),
     ]);
     const runtime = meta?.runtime ?? null;
     const all = lists.flatMap((l) => l.streams ?? []);
@@ -243,7 +266,9 @@ export function createAdvisor({
     }
 
     const factsFor = factsLookup(readFacts()?.facts ?? {});
-    const out = adviseStreams(all, { profile: profile(), runtimeMin: runtime, factsFor, sort: cfg.sort, display: cfg.display });
+    const out = adviseStreams(all, {
+      profile: profile(), runtimeMin: runtime, factsFor, sort: cfg.sort, display: cfg.display, cachedFor: cachedLookup(onMac),
+    });
     if (cfg.probe.enabled) probeTop(all, factsFor, cfg);
     recordTitles(all, type, id, meta);
 

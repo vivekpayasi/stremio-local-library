@@ -36,7 +36,7 @@ from pathlib import Path
 
 import libtorrent as lt
 
-from dashboard import PAGE as DASHBOARD_PAGE, Dashboard, last_tv_ip, ui_allowed, ui_write_allowed
+from dashboard import PAGE as DASHBOARD_PAGE, Dashboard, cached_progress, last_tv_ip, ui_allowed, ui_write_allowed
 from stream_facts import FFPROBE, FactStore, Prober, ffprobe_runner
 
 HOME = Path.home()
@@ -1064,6 +1064,12 @@ class Handler(BaseHTTPRequestHandler):
                 Handler.tv_ip = self.client_address[0]
             if path == '/torrentd/health':
                 return self.json(self.engine.health())
+            if path == '/torrentd/cached':
+                # For the advisor on this Mac: what is already downloaded says what has been watched.
+                if not self.client_address[0].startswith('127.'):
+                    return self.send_bytes(403, 'text/plain', b'')
+                return self.send_bytes(200, 'application/json', json.dumps(cached_progress(
+                    CONFIG['cache_dir'], set(self.engine.torrents), self.engine.file_progress)).encode())
             m = re.fullmatch(rf'/torrentd/debug/({IH})', path)
             if m:
                 t = self.engine.find(m.group(1))

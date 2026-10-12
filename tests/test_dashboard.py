@@ -9,7 +9,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'src'))
 
-from dashboard import (Dashboard, account_status, bdecode, cache_entries, classify_requests, clear_cache,  # noqa: E402
+from dashboard import (Dashboard, account_status, bdecode, cache_entries, cached_progress, classify_requests,  # noqa: E402
+                       clear_cache,
                        delete_cached, resume_progress, filter_log, health, last_tv_ip, parse_mac_wifi, parse_ping, parse_tv_snapshot,
                        piece_strip, summarize_session, title_for, ui_allowed, ui_write_allowed)
 
@@ -493,6 +494,24 @@ class Resume(unittest.TestCase):
                         {'name': 'poster.png', 'length': 80_000, 'done': 1.0}]
             row = cache_entries(d, {'a' * 40}, {}, live_progress=lambda ih: progress)[0]
             self.assertEqual([f['name'] for f in row['files']], ['Show.S01E03.mkv', 'Show.S01E02.mkv'])
+
+
+class CachedProgress(unittest.TestCase):
+    def test_per_torrent_and_file_index_for_the_advisor(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            for ih, bits in (('a' * 40, 0b11100000), ('b' * 40, 0b00000000)):
+                t = Path(d) / ih
+                t.mkdir()
+                info = {'name': 'Show S01', 'piece length': 4 * MB,
+                        'files': [{'length': 8 * MB, 'path': ['E01.mkv']}, {'length': 6 * MB, 'path': ['E02.mkv']}]}
+                (t / '.resume').write_bytes(benc({'info': info, 'pieces': bytes([bits])}))
+            out = cached_progress(d, in_session={'c' * 40}, live_progress=lambda ih: None)
+            self.assertEqual(out, {'a' * 40: {'0': 1.0, '1': 0.6667}})
+            live = cached_progress(d, in_session={'a' * 40},
+                                   live_progress=lambda ih: [{'name': 'E01.mkv', 'length': 8 * MB, 'done': 0.5},
+                                                             {'name': 'E02.mkv', 'length': 6 * MB, 'done': 0.004}])
+            self.assertEqual(live, {'a' * 40: {'0': 0.5}})
 
 
 class TvAddress(unittest.TestCase):
