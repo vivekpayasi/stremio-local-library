@@ -268,10 +268,7 @@ export function rate(stream, { profile, facts = null, runtimeMin = null } = {}) 
   const rate_ = bitrateMbps != null ? `${estimated ? '~' : ''}${Math.round(bitrateMbps)} Mbps` : null;
   if (rate_) summary.push(rate_);
   if (name.peers != null) summary.push(`${name.peers} peers`);
-  // The TV card already shows the container in the name and the peers in Torrentio's stats line.
-  const brief = [picture, audioShown && audioLabel(audioShown), rate_].filter(Boolean);
-
-  return { stars, issues, notes, summary, brief, verified, bitrateMbps, estimated };
+  return { stars, issues, notes, summary, verified, bitrateMbps, estimated };
 }
 
 // ---------------------------------------------------------------- display
@@ -282,40 +279,25 @@ export const starsOf = (n) => '⭐'.repeat(n);
 /** The stars a decorated stream shows (0 when it was passed through unrated). */
 export const starsIn = (stream) => (String(stream?.name ?? '').split('\n')[0].match(/⭐/gu) ?? []).length;
 
-const SOURCES = [
-  [/(?:bd)?remux/, 'REMUX'], [/web[ -]?dl|webdl/, 'WEB-DL'], [/web[ -]?rip/, 'WEBRip'], [/blu ?-?ray/, 'BluRay'],
-  [/bd ?rip|br ?rip/, 'BDRip'], [/uhd ?rip/, 'UHDRip'], [/hdtv/, 'HDTV'], [/dvd ?rip/, 'DVDRip'], [/web/, 'WEB'],
-];
-const CODECS = [[/x ?265/, 'x265'], [/hevc|h ?265/, 'HEVC'], [/av1/, 'AV1'], [/x ?264/, 'x264'], [/avc|h ?264/, 'H.264']];
-
-/** "Accid · BDRip · x265": who released it, from what source, encoded how. */
-export function releaseLabel(release, filename) {
-  const group = (s) => {
-    const t = String(s ?? '').replace(/\.[a-z0-9]{2,4}$/i, '').trim();
-    if (t.endsWith('…')) return null;
-    return /\[([A-Za-z0-9][A-Za-z0-9 ._]{1,20})\]$/.exec(t)?.[1] ?? /-([A-Za-z0-9]{2,20})$/.exec(t)?.[1] ?? null;
-  };
-  const text = ` ${`${release ?? ''} ${filename ?? ''}`.toLowerCase().replace(/[._]/g, ' ')} `;
-  const tok = (re) => new RegExp(`(?<![a-z0-9])(?:${re.source})(?![a-z0-9])`).test(text);
-  return [group(release) ?? group(filename), SOURCES.find(([re]) => tok(re))?.[1], CODECS.find(([re]) => tok(re))?.[1]]
-    .filter(Boolean).join(' · ');
+/** The verdict at a glance, beside the stars: ✓✓ plays and was checked in the file, ✓ plays (judged from the
+ * release name), ⚠ plays with a caveat or untested, ✗ won't play or very likely fails. */
+export function symbolOf(r) {
+  return r.stars <= 2 ? '✗' : r.stars <= 4 ? '⚠' : r.verified ? '✓✓' : '✓';
 }
 
-function verdict(r) {
-  if (r.issues.length) {
-    const i = r.issues[0];
-    return `${i.cap <= 2 ? '✗' : '⚠'} ${i.short ?? i.why}${r.issues.length > 1 ? ` (+${r.issues.length - 1})` : ''}`
-      + (r.verified ? ' (checked)' : '');
-  }
-  return `✓ ${r.brief.length ? r.brief.join(' · ') : 'Should play fine'}${r.verified ? ' (checked)' : ''}`;
+/** Why a ⚠ or ✗ stream got that: its worst issue, briefly, and how many more there are. */
+function reason(r) {
+  const i = r.issues[0];
+  return i ? `${i.short ?? i.why}${r.issues.length > 1 ? ` (+${r.issues.length - 1})` : ''}` : null;
 }
 
 /**
- * The same stream with its rating shown: stars in the name (the narrow left column on the TV) and the reasons
- * in the description. Everything that makes it play is left untouched.
+ * The same stream with its rating shown. Everything that makes it play is left untouched.
  *
- * 'compact' (the default) rebuilds Torrentio's description into short lines, most useful first — the TV shows
- * each stream as a narrow card with room for about eight. 'full' puts the reasons above the upstream's own text.
+ * 'compact' (the default), for the TV's narrow stream cards: stars, then the verdict symbol in front of the
+ * upstream's quality line, in the left column; the description keeps the upstream's own text, trimmed — for a
+ * ⚠ or ✗ stream led by the reason, and without the file-name line Torrentio adds for season packs.
+ * 'full': plain stars in the name and the reasons above the upstream's full text.
  */
 export function decorate(stream, r, { style = 'compact' } = {}) {
   const lines = (stream.name ?? '').split('\n');
@@ -326,26 +308,27 @@ export function decorate(stream, r, { style = 'compact' } = {}) {
   const field = stream.title == null && stream.description != null ? 'description' : 'title';
   const text = stream[field];
 
-  let out;
   if (style === 'full') {
     const reasons = r.issues.length
       ? r.issues.slice(0, 2).map((i) => `${i.cap <= 2 ? '✗' : '⚠'} ${i.why}`).join(' · ') + (r.verified ? ' · verified' : '')
       : `✓ ${[...(r.verified ? ['verified'] : []), ...r.summary, ...r.notes].join(' · ')}`;
-    out = text ? `${reasons}\n${text}` : reasons;
-  } else {
-    const own = String(text ?? '').split('\n');
-    const at = own.findIndex((l) => /👤|💾/.test(l));
-    const notes = r.notes.map((n) => `⚠ ${n[0].toUpperCase()}${n.slice(1)}`);
-    if (at === -1) {
-      out = [verdict(r), ...notes, ...own.filter((l) => l.trim())].join('\n');
-    } else {
-      // Torrentio: release name, then the file's name for packs (the episode is already chosen), the stats
-      // line, then languages. The full release name goes last, where the TV cuts it off first.
-      out = [verdict(r), ...notes, releaseLabel(own[0], stream.behaviorHints?.filename), own[at],
-        ...own.slice(at + 1).filter((l) => l.trim()), at > 0 ? own[0] : null].filter(Boolean).join('\n');
-    }
+    return { ...stream, name: rest ? `${stars}\n${rest}` : stars, [field]: text ? `${reasons}\n${text}` : reasons };
   }
-  return { ...stream, name: rest ? `${stars}\n${rest}` : stars, [field]: out };
+
+  const sym = symbolOf(r);
+  const why = r.stars <= 4 ? reason(r) : null;
+  const notes = r.notes.map((n) => `${n[0].toUpperCase()}${n.slice(1)}`);
+  const own = String(text ?? '').split('\n');
+  const at = own.findIndex((l) => /👤|💾/.test(l));
+  // Torrentio: release name, then the file's name for packs (the episode is already chosen), the stats line,
+  // then languages. The release name goes last, where the TV cuts it off first.
+  const body = at === -1 ? own.filter((l) => l.trim())
+    : [own[at], ...own.slice(at + 1).filter((l) => l.trim()), at > 0 ? own[0] : null];
+  return {
+    ...stream,
+    name: `${stars}\n${rest ? `${sym} ${rest}` : sym}`,
+    [field]: [why, ...notes, ...body].filter(Boolean).join('\n'),
+  };
 }
 
 /** Rate and decorate a whole list; `sort: 'rating'` puts the best first (stable within a rating). */

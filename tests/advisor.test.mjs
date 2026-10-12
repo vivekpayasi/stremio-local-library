@@ -95,7 +95,8 @@ test('streams come back rated, unchanged where it matters, with verified facts u
   assert.equal(streams.length, 2);
   assert.match(streams[0].name, /^⭐\n/u);
   assert.match(streams[1].name, /^⭐{5}\n/u);
-  assert.match(streams[1].title, /^✓ DV P8 · E-AC3 · 26 Mbps \(checked\)\n/);
+  assert.match(streams[1].name, /^⭐{5}\n✓✓ 4k DV \| HDR10$/u);
+  assert.match(streams[1].title, /^👤 173 💾 19\.86 GB/u);
   for (const [i, s] of streams.entries()) {
     assert.equal(s.infoHash, STREAMS[i].infoHash);
     assert.equal(s.fileIdx, STREAMS[i].fileIdx);
@@ -200,13 +201,13 @@ test('a stream without fileIdx uses the facts of its torrent when only one file 
   const noIdx = STREAMS.map((s) => ({ ...s, fileIdx: undefined }));
   const one = setup({ config: CONFIGURED, upstream: () => ({ streams: noIdx }), facts: { [`${IH_GOOD}:0`]: FACT_GOOD } });
   const { streams } = await one.advisor.route('/advisor/stream/movie/tt1.json');
-  assert.match(streams[1].title, /^✓ .*\(checked\)/);
+  assert.match(streams[1].name, /\n✓✓ /);
   one.cleanup();
 
   const two = setup({ config: CONFIGURED, upstream: () => ({ streams: noIdx }),
     facts: { [`${IH_GOOD}:0`]: FACT_GOOD, [`${IH_GOOD}:3`]: FACT_GOOD } });
   const r2 = await two.advisor.route('/advisor/stream/movie/tt1.json');
-  assert.doesNotMatch(r2.streams[1].title, /\(checked\)/, 'ambiguous: several files of that torrent are known');
+  assert.doesNotMatch(r2.streams[1].name, /✓✓/, 'ambiguous: several files of that torrent are known');
   two.cleanup();
 });
 

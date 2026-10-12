@@ -122,13 +122,17 @@ video and audio codecs, the Dolby Vision profile, the bitrate and the swarm. The
 puts that verdict in Stremio's stream list, as 1–5 ⭐ on every Torrentio stream:
 
 ```
-⭐⭐⭐⭐⭐  ✓ verified · MKV · E-AC3 · DV P8 · 26 Mbps · 173 peers
-4k DV   Obsessão 2026 WEB-DL 2160p x265 DV HDR10 DUAL 5.1
-        👤 173 💾 20.03 GB ⚙️ BluDV
+⭐⭐⭐⭐⭐          👤 173 💾 20.03 GB ⚙️ BluDV
+✓✓ 4k DV | HDR    Dual Audio / 🇬🇧 / 🇵🇹
+                  Obsessão 2026 WEB-DL 2160p x265 DV HDR10 DUAL 5.1
 
-⭐         ✗ TrueHD audio — this TV can't decode it · verified
-4k DV   Obsession (2026) (2160p UHD BluRay x265 10bit DV HDR TrueHD Atmos 7.1 … r00t)
+⭐                 TrueHD: TV can't decode
+✗ 4k DV | HDR     👤 266 💾 20.03 GB ⚙️ 1337x
+                  Obsession (2026) (2160p UHD BluRay x265 10bit DV HDR TrueHD Atmos 7.1 … r00t)
 ```
+
+✓✓ plays and was checked in the file itself, ✓ plays (judged from the release name), ⚠ plays with a caveat or
+is untested, ✗ won't play. For ⚠ and ✗ the card starts with the reason.
 
 Stremio shows each addon's streams as that addon sends them, so the advisor is an addon of its own
 (served by the same service at `/advisor/manifest.json`). It asks your Torrentio for the list, rates
@@ -184,7 +188,7 @@ Settings in `advisor.json`:
 | --- | --- | --- |
 | `upstreams` | your Torrentio | stream addons whose lists are rated, `[{ "name", "url" }]` |
 | `sort` | `"original"` | `"rating"` lists the best-rated streams first |
-| `display` | `"compact"` | the text on each stream card: `"compact"` rebuilds it into short lines (the verdict, who released it and how, Torrentio's stats and languages, then the full name); `"full"` puts the reasons above Torrentio's own text |
+| `display` | `"compact"` | the stream cards: `"compact"` puts a symbol before the quality line — ✓✓ plays and was checked in the file, ✓ plays, ⚠ a caveat or untested, ✗ won't play — and trims Torrentio's text, led by the reason for ⚠ and ✗; `"full"` puts the reasons above Torrentio's own text |
 | `probe.enabled` | `false` | also probe the top `probe.top` unplayed streams of each list in the background (a few MB each), so their ratings are verified next time |
 | `enabled` | `true` | `false` turns the advisor off |
 
