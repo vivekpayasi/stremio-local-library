@@ -209,34 +209,23 @@ Settings in `advisor.json`:
 
 `http://localhost:11472/ui` shows what the TV is playing and how healthy the stream is, live:
 
-- **Now playing** — title and poster, and a strip of the whole file: what is downloaded, where the TV is
-  playing, how much is buffered ahead of it (in minutes once the file's bitrate is known), and where you
-  seeked. Below it the download speed against what the file needs, the peers, a short history of the buffer,
-  what the file contains (read from the file itself once it has played), whether the MP4 subtitle fix is
-  active, and every stall with its likely cause.
-- **TV** — over ADB, when the TV allows it: which player Stremio is using, the video decoder, Wi-Fi signal,
-  free memory, and the last player error (for example a decoder rejecting Dolby Vision profile 7).
-- **Network** — this Mac's Wi-Fi and a ping to the TV, which is what separates a slow torrent from a slow
-  living-room link.
-- **This Mac** and **Library** — the torrent server's CPU and memory, cache use, the library, the Stream
-  Advisor and the state of your Stremio account. And the server log, without the TV's constant polling.
-- **Downloaded torrents** — everything in the torrent cache, newest first, with its size and when it was last
-  used. Delete one, or everything not in use, to free disk space. Whatever is playing, or was read in the last
-  two minutes, can't be deleted.
-- **Download next episode** — under a season pack that is playing, was played, or is in the cache: the
-  episode after it in the same pack, with a button to download it to this Mac for later, so it plays from the
-  Mac (and the TV's stream card shows it as downloaded). One file at a time, in the order asked, at the lowest
-  priority, within the download limit. It pauses whenever a stream is short of buffer, so it doesn't take
-  bandwidth the TV needs, and whenever the disk is down to the space kept free. It is refused when it wouldn't
-  fit on disk, or when it would take the pack itself past the cache budget — the cache would then delete the
-  whole pack once idle; delete the episodes you've watched first. Older downloads not in use make room for it.
-  Cancel keeps what has arrived, and asking again carries on from there (also after a restart of the server).
-  A downloaded episode stays as long as the cache budget allows: like everything in the cache, the oldest is
-  deleted first when newer downloads need the room.
+- **What's playing**, at a glance: the title over its artwork, how much is ready ahead of the TV in plain words ("4 min 20 s
+  ready ahead of you"), and the episode drawn as a player's scrubber — what is downloaded, where the TV is, the buffered stretch
+  ahead. Any problem — a stall, a slow Wi-Fi link, a player error on the TV, a service down — goes to the top of the page in one
+  sentence, with what to do about it.
+- **Up next**: the episode after the one you're watching (or watched last), with a button to download it to this Mac for later —
+  one file at a time, at the lowest priority, pausing whenever a stream is short of buffer or the disk is down to the space kept
+  free; refused when it wouldn't fit. A downloaded episode stays as long as the cache budget allows.
+- **On this Mac**: one card per show or movie. A show's card opens its season with every episode of the pack — on the Mac,
+  downloading, or not here — each with its one action (Download, Cancel, Delete). A movie's card lists its releases with whether
+  each plays on your TV (the same ✓✓ / ✓ / ⚠ / ✗ as the stream cards), how much of it is here, and Delete.
+- **From the swarm to your TV**: the path a stream takes — the swarm, this Mac (with the torrent server, the library, the Stream
+  Advisor and your Stremio account), the Wi-Fi, the TV — each step with its health and, on tap, its details. When something is
+  wrong, the weak step says why.
+- **Recent** seeks and stalls with their cause, the buffer's history, and the server log at the bottom.
 
-The status line at the top says in one sentence whether things are fine and, if not, why. The page works
-on a phone: it shows what is being watched, so by default only this Mac can open it. To open it from other
-devices on your network, add `"dashboard_lan": true` to `~/.stremio-local-addon/torrentd.json` and restart
+The page works on a phone: it shows what is being watched, so by default only this Mac can open it. To open
+it from other devices on your network, add `"dashboard_lan": true` to `~/.stremio-local-addon/torrentd.json` and restart
 the torrent server; the menu bar then offers the address to copy —
 `https://<your-dashed-ip>.<your-hash>.stremio.rocks:12472/ui`, the same host the TV uses. Nothing is collected
 while nobody has the page open.
