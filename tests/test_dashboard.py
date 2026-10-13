@@ -479,6 +479,8 @@ class Resume(unittest.TestCase):
             (t / '.resume').write_bytes(benc({'info': info, 'pieces': bytes([0b00100000])}))
             row = cache_entries(d, set(), {})[0]
             self.assertEqual([(f['name'], round(f['done'], 2)) for f in row['files']], [('Show.S01E02.mkv', 0.67)])
+            self.assertEqual([(f['name'], round(f['done'], 2)) for f in row['videos']],
+                             [('Show.S01E01.mkv', 0.0), ('Show.S01E02.mkv', 0.67)], 'every video, for the title sheets')
             live = cache_entries(d, {'a' * 40}, {}, live_progress=lambda ih: [{'name': 'Show.S01E02.mkv', 'length': 6 * MB, 'done': 0.9}])
             self.assertEqual(live[0]['files'][0]['done'], 0.9, 'a torrent in the session reports live progress')
 

@@ -17,6 +17,7 @@ import urllib.request
 from collections import deque
 from pathlib import Path
 
+from media_text import EPISODE, SAMPLE, VIDEO, clock, episode_key, episode_label, next_episode  # noqa: F401 (re-exported for tests)
 from prefetch import ACTIVE as JOB_ACTIVE
 
 MB = 1024 * 1024
@@ -173,7 +174,6 @@ def ui_write_allowed(client, host, fetch_site, marker, lan, own, cert_suffix):
 
 
 IH_DIR = re.compile(r'[0-9a-f]{40}')
-VIDEO = re.compile(r'\.(mkv|mp4|m4v|avi|mov|ts|m2ts|mts|webm|wmv|mpg)$', re.I)
 RECENT_S = 120   # used this recently = in use: after a restart, a reader takes a moment to reconnect
 
 
@@ -285,6 +285,7 @@ def cache_entries(cache_dir, in_session, titles, live_progress=None, busy_files=
                      'poster': t.get('poster'), 'bytes': _usage(d), 'last_used': used, 'in_use': _in_use(d, in_session),
                      # Videos only (not the .nfo or poster that come along), at least 1% in (not a piece shared
                      # with the neighbouring episode), most complete first.
+                     'videos': [f for f in sorted(files, key=lambda f: f['idx']) if VIDEO.search(f['name'])],
                      'files': sorted((f for f in files if f['done'] >= 0.01 and VIDEO.search(f['name'])),
                                      key=lambda f: -f['done'])[:6],
                      'next': next_episode(files)})
@@ -382,47 +383,6 @@ def clear_cache(cache_dir, in_session):
     return deleted, freed
 
 
-EPISODE = re.compile(r'(?:\bS(\d{1,2})[ ._-]?E(\d{1,3})|\b(\d{1,2})x(\d{2,3}))', re.I)
-
-
-SAMPLE = re.compile(r'\bsample\b', re.I)
-
-
-def _episode(name):
-    """(season, episode) from a file name, or None."""
-    m = EPISODE.search(name or '')
-    return (int(m.group(1) or m.group(3)), int(m.group(2) or m.group(4))) if m else None
-
-
-def episode_label(name):
-    """'S01E03' for a file name with an episode code, else the name."""
-    k = _episode(name)
-    return f'S{k[0]:02d}E{k[1]:02d}' if k else name
-
-
-def next_episode(files, current_idx=None):
-    """The file of a season pack to download for later: {idx, label, name, length, done} of the episode after the
-    one at `current_idx` — or, with none given, after the furthest episode with data. None at the end of the pack,
-    or when the file names carry no episode codes. `files` as resume_progress lists them."""
-    episodes = {}
-    for f in files:
-        key = _episode(f['name'])
-        if not key or not VIDEO.search(f['name']) or SAMPLE.search(f['name']):
-            continue
-        if key not in episodes or f['length'] > episodes[key]['length']:   # two copies of one episode: the bigger
-            episodes[key] = f
-    if current_idx is None:
-        started = [k for k, f in episodes.items() if f['done'] >= 0.01]
-        current = max(started, default=None)
-    else:       # the playing file's own episode: it may be the smaller of two copies
-        current = next((_episode(f['name']) for f in files if f['idx'] == current_idx), None)
-    later = sorted(k for k in episodes if current is not None and k > current)
-    if not later:
-        return None
-    f = episodes[later[0]]
-    return {'idx': f['idx'], 'label': episode_label(f['name']), 'name': f['name'], 'length': f['length'], 'done': f['done']}
-
-
 def title_for(titles, ih, idx, file_name):
     """What the advisor recorded for this file. Season packs share one hash across episodes, so a match on
     the hash alone takes the episode from the file name rather than from whichever episode was browsed last."""
@@ -474,11 +434,6 @@ def piece_strip(have, buckets=120):
         a, b = i * n // buckets, (i + 1) * n // buckets
         out.append(round(sum(1 for x in have[a:b] if x) / (b - a), 3))
     return out
-
-
-def clock(s):
-    s = int(round(s))
-    return f'{s // 3600}:{s // 60 % 60:02d}:{s % 60:02d}' if s >= 3600 else f'{s // 60}:{s % 60:02d}'
 
 
 def classify_requests(reqs, size, duration_s=None, now=None, stalls=()):
