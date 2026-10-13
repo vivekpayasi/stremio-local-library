@@ -5,7 +5,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { rate, decorate, adviseStreams, defaultProfile, mergeProfile } from '../src/rating.mjs';
+import { rate, decorate, adviseStreams, defaultProfile, mergeProfile, labelOf, verdictOf } from '../src/rating.mjs';
 
 const PROFILE = defaultProfile();
 const hash = (c) => c.repeat(40);
@@ -376,4 +376,23 @@ test('adviseStreams keeps the upstream order unless asked to sort by rating', ()
   assert.deepEqual(adviseStreams(list, ctx).map((s) => s.infoHash), list.map((s) => s.infoHash));
   const sorted = adviseStreams(list, { ...ctx, sort: 'rating' });
   assert.deepEqual(sorted.map((s) => s.infoHash), [ACCID, web(3), R00T].map((s) => s.infoHash));
+});
+
+test('labelOf: the quality chips a release name gives', () => {
+  const s = (title, filename, quality = '4k') => ({ name: `Torrentio\n${quality}`, title, behaviorHints: { filename } });
+  assert.deepEqual(
+    labelOf(s('Obsession.2026.2160p.iT.WEB-DL.UNRATED.DV.HDR10+.MULTi.FRE.LAT.DDP5.1.Atmos.H265.MP4-BEN.THE.MEN\n👤 50 💾 21.7 GB',
+      'Obsession.2026.2160p.iT.WEB-DL.UNRATED.DV.HDR10+.MULTi.FRE.LAT.DDP5.1.Atmos.H265.MP4-BEN.THE.MEN.mp4')),
+    ['4K', 'WEB', 'DV + HDR10+', 'E-AC3 Atmos', 'MP4']);
+  assert.deepEqual(
+    labelOf(s('Movie.2026.2160p.UHD.BluRay.x265.10bit.DV.HDR.TrueHD.Atmos.7.1-XYZ', 'Movie.2026.2160p.UHD.BluRay.x265.10bit.DV.HDR.TrueHD.Atmos.7.1-XYZ.mkv')),
+    ['4K', 'BluRay', 'DV + HDR10', 'TrueHD Atmos', 'MKV']);
+  assert.deepEqual(labelOf(s('Show.S01E01.1080p.WEB.h264', 'Show.S01E01.1080p.WEB.h264.mkv', '1080p')), ['1080p', 'WEB', 'MKV']);
+});
+
+test('verdictOf: the symbol, the short reason for ⚠ and ✗, and the summary without the peer count', () => {
+  const bad = { stars: 1, verified: false, issues: [{ cap: 1, why: 'TrueHD audio', short: "TrueHD: TV can't decode" }], summary: ['MKV', 'TrueHD', '266 peers'] };
+  assert.deepEqual(verdictOf(bad), { symbol: '✗', reason: "TrueHD: TV can't decode", summary: ['MKV', 'TrueHD'] });
+  const good = { stars: 5, verified: true, issues: [], summary: ['MKV', 'E-AC3', 'DV P8', '26 Mbps'] };
+  assert.deepEqual(verdictOf(good), { symbol: '✓✓', reason: null, summary: ['MKV', 'E-AC3', 'DV P8', '26 Mbps'] });
 });

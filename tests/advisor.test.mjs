@@ -50,7 +50,11 @@ function setup({ config, facts = {}, upstream = () => ({ streams: STREAMS }), co
     const u = String(url);
     const reply = (status, body) => ({ ok: status === 200, status, json: async () => body });
     if (u.startsWith('https://v3-cinemeta.strem.io/meta/')) {
-      return reply(200, { meta: { runtime: '109 min', name: 'Chernobyl', releaseInfo: '2019', poster: 'https://images.metahub.space/poster/medium/tt7366338/img' } });
+      return reply(200, { meta: {
+        runtime: '109 min', name: 'Chernobyl', releaseInfo: '2019', poster: 'https://images.metahub.space/poster/medium/tt7366338/img',
+        background: 'https://images.metahub.space/background/medium/tt7366338/img',
+        videos: [{ season: 1, episode: 1, name: '1:23:45' }, { season: 1, episode: 2, name: 'Please Remain Calm' }, { season: 0, episode: 1, title: 'Special' }],
+      } });
     }
     if (u.startsWith('https://torrentio.strem.fun/') && u.includes('/stream/')) {
       const out = upstream(u);
@@ -240,13 +244,34 @@ test('which title each torrent belongs to is recorded for the dashboard', async 
   const { advisor, files, cleanup } = setup({ config: CONFIGURED });
   await advisor.route('/advisor/stream/series/tt7366338:1:2.json');
   const titles = JSON.parse(fs.readFileSync(files.titles, 'utf8'));
-  assert.deepEqual(titles[IH_GOOD], {
+  const { at, verdict, label, ...rest } = titles[IH_GOOD];
+  assert.deepEqual(rest, {
     imdb: 'tt7366338', type: 'series', name: 'Chernobyl', year: '2019', season: 1, episode: 2,
-    poster: 'https://images.metahub.space/poster/medium/tt7366338/img', at: titles[IH_GOOD].at,
+    poster: 'https://images.metahub.space/poster/medium/tt7366338/img',
   });
-  assert.equal(typeof titles[IH_GOOD].at, 'number');
+  assert.equal(typeof at, 'number');
+  assert.ok(verdict && label);
   assert.equal(titles[`${IH_GOOD}:0`].episode, 2, 'per file too: a season pack shares its hash across episodes');
   assert.equal(titles[`${IH_BAD}:4`].episode, 2);
+  cleanup();
+});
+
+test('each stream\'s verdict and quality chips, and the title\'s art and episode names, are recorded for the dashboard', async () => {
+  const { advisor, files, cleanup } = setup({ config: CONFIGURED });
+  await advisor.route('/advisor/stream/series/tt7366338:1:2.json');
+  const titles = JSON.parse(fs.readFileSync(files.titles, 'utf8'));
+  const bad = titles[`${IH_BAD}:4`];
+  assert.equal(bad.verdict.symbol, '✗');
+  assert.match(bad.verdict.reason, /^TrueHD: TV can't decode/);
+  assert.ok(!bad.verdict.summary.some((x) => / peers$/.test(x)), 'the peer count goes stale; it is left out');
+  assert.deepEqual(bad.label, ['4K', 'BluRay', 'DV + HDR10', 'TrueHD Atmos', 'MKV']);
+  assert.deepEqual(titles[`${IH_GOOD}:0`].label, ['4K', 'WEB', 'DV + HDR10', 'MKV']);
+  const { at, ...meta } = titles['meta:tt7366338'];
+  assert.deepEqual(meta, {
+    background: 'https://images.metahub.space/background/medium/tt7366338/img',
+    episodes: { '1:1': '1:23:45', '1:2': 'Please Remain Calm', '0:1': 'Special' },
+  });
+  assert.equal(typeof at, 'number');
   cleanup();
 });
 

@@ -13,7 +13,7 @@ import path from 'node:path';
 
 import { readAuthKey } from './auth.mjs';
 import { api } from './autoheal.mjs';
-import { adviseStreams, defaultProfile, mergeProfile, starsIn } from './rating.mjs';
+import { adviseStreams, defaultProfile, labelOf, mergeProfile, starsIn, verdictOf } from './rating.mjs';
 
 const DIR = path.join(os.homedir(), '.stremio-local-addon');
 export const ADVISOR_FILES = {
@@ -93,7 +93,7 @@ export function createAdvisor({
   const readProfile = watchedJson(files.profile);
   const readFacts = watchedJson(files.facts);
   const upstreamCache = new Map();   // url -> { at, streams }
-  const metas = new Map();           // imdb id -> { runtime, name, year, poster }
+  const metas = new Map();           // imdb id -> { runtime, name, year, poster, background, episodes }
   let cached = { at: 0, map: {} };   // from the torrent server: info hash -> { file index: fraction on this Mac }
   const warned = new Set();   // things said once, not on every retry
   const warnOnce = (msg) => { if (!warned.has(msg)) { warned.add(msg); log(msg); } };
@@ -158,31 +158,43 @@ export function createAdvisor({
     try {
       const res = await fetch(`${CINEMETA}/meta/${type}/${imdb}.json`, { signal: AbortSignal.timeout(6000) });
       const m = res.ok ? (await res.json())?.meta : null;
-      if (m) meta = { runtime: parseRuntime(m.runtime), name: m.name ?? null, year: m.releaseInfo ?? m.year ?? null, poster: m.poster ?? null };
+      if (m) {
+        meta = {
+          runtime: parseRuntime(m.runtime), name: m.name ?? null, year: m.releaseInfo ?? m.year ?? null, poster: m.poster ?? null,
+          background: m.background ?? null,
+          episodes: Object.fromEntries((m.videos ?? [])
+            .filter((v) => Number.isInteger(v.season) && Number.isInteger(v.episode) && (v.name || v.title))
+            .map((v) => [`${v.season}:${v.episode}`, v.name || v.title])),
+        };
+      }
     } catch { /* offline: no bitrate estimate or title this time */ }
     if (meta) metas.set(imdb, meta);
     return meta;
   }
 
-  // The torrent server only sees info hashes; this lets the dashboard name what is playing. Kept to the
-  // most recent few thousand torrents.
-  function recordTitles(streams, type, id, meta) {
+  // The torrent server only sees info hashes; this lets the dashboard name what is playing, say whether each cached
+  // release plays here, and show the title's art and episode names. Kept to the most recent few thousand entries.
+  function recordTitles(streams, type, id, meta, rated) {
     if (!files.titles) return;
     const [imdb, season, episode] = id.split(':');
     let titles = {};
     try { titles = JSON.parse(fs.readFileSync(files.titles, 'utf8')); } catch { /* first time */ }
+    const at = Date.now();
     const entry = {
       imdb, type, name: meta?.name ?? null, year: meta?.year ?? null,
       season: season ? Number(season) : null, episode: episode ? Number(episode) : null,
-      poster: meta?.poster ?? null, at: Date.now(),
+      poster: meta?.poster ?? null, at,
     };
     for (const s of streams) {
       if (!s?.infoHash) continue;
       const ih = String(s.infoHash).toLowerCase();
-      titles[ih] = entry;
+      const r = rated.get(s);
+      const e = r ? { ...entry, verdict: verdictOf(r), label: labelOf(s) } : entry;
+      titles[ih] = e;
       // A season pack's hash comes up for every episode; the file index says which one this stream is.
-      if (Number.isInteger(s.fileIdx)) titles[`${ih}:${s.fileIdx}`] = entry;
+      if (Number.isInteger(s.fileIdx)) titles[`${ih}:${s.fileIdx}`] = e;
     }
+    if (meta) titles[`meta:${imdb}`] = { background: meta.background ?? null, episodes: meta.episodes ?? {}, at };
     const keep = Object.entries(titles).sort((a, b) => b[1].at - a[1].at).slice(0, 6000);
     try {
       fs.writeFileSync(`${files.titles}.tmp`, JSON.stringify(Object.fromEntries(keep)));
@@ -266,11 +278,13 @@ export function createAdvisor({
     }
 
     const factsFor = factsLookup(readFacts()?.facts ?? {});
+    const rated = new Map();
     const out = adviseStreams(all, {
       profile: profile(), runtimeMin: runtime, factsFor, sort: cfg.sort, display: cfg.display, cachedFor: cachedLookup(onMac),
+      onRated: (s, r) => rated.set(s, r),
     });
     if (cfg.probe.enabled) probeTop(all, factsFor, cfg);
-    recordTitles(all, type, id, meta);
+    recordTitles(all, type, id, meta, rated);
 
     const hist = [1, 2, 3, 4, 5].map((n) => out.filter((s) => starsIn(s) === n).length);
     const verified = all.filter((s) => factsFor(s)).length;

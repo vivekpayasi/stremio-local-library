@@ -122,6 +122,8 @@ function fromName(stream) {
     video: { codec, bit10: has('bit10') || has('hi10p'), dv, dvStated: Boolean(explicit) },
     hdr: has('hdr10plus') ? 'HDR10+' : has('hdr') ? 'HDR10' : has('hlg') ? 'HLG' : null,
     audio,
+    source: discRemux ? 'REMUX' : has('bluray') ? 'BluRay' : has('web') ? 'WEB' : null,
+    atmos: has('atmos'),
     remux: discRemux, upscale: has('upscale'), interpolated: has('interpolated'),
     fps: Number(RE.hfr.exec(s)?.[1] ?? 0) || null,
     peers: peers ? Number(peers[1]) : null,
@@ -285,10 +287,26 @@ export function symbolOf(r) {
   return r.stars <= 2 ? '✗' : r.stars <= 4 ? '⚠' : r.verified ? '✓✓' : '✓';
 }
 
+const RESOLUTION_LABEL = { '4320p': '8K', '2160p': '4K', '1080p': '1080p', '720p': '720p' };
+
+/** What a release is, in a few chips for the dashboard: resolution, source, picture, the first audio track, container. */
+export function labelOf(stream) {
+  const n = fromName(stream);
+  const picture = n.video.dv != null ? (n.hdr ? `DV + ${n.hdr}` : 'DV') : n.hdr;
+  const audio = n.audio[0] ? `${audioLabel(n.audio[0])}${n.atmos ? ' Atmos' : ''}` : null;
+  return [RESOLUTION_LABEL[n.resolution], n.source, picture, audio, n.container?.toUpperCase()].filter(Boolean);
+}
+
 /** Why a ⚠ or ✗ stream got that: its worst issue, briefly, and how many more there are. */
 function reason(r) {
   const i = r.issues[0];
   return i ? `${i.short ?? i.why}${r.issues.length > 1 ? ` (+${r.issues.length - 1})` : ''}` : null;
+}
+
+/** A rating as the dashboard shows it: the symbol, the reason for a ⚠ or ✗, and what the file is (without the
+ * peer count, which goes stale). */
+export function verdictOf(r) {
+  return { symbol: symbolOf(r), reason: r.stars <= 4 ? reason(r) : null, summary: r.summary.filter((x) => !/ peers$/.test(x)) };
 }
 
 /**
@@ -335,12 +353,13 @@ export function decorate(stream, r, { style = 'compact', cached = null } = {}) {
 
 /** Rate and decorate a whole list; `sort: 'rating'` puts the best first (stable within a rating). */
 export function adviseStreams(streams, {
-  profile, runtimeMin = null, factsFor = () => null, sort = 'original', display, cachedFor = () => null,
+  profile, runtimeMin = null, factsFor = () => null, sort = 'original', display, cachedFor = () => null, onRated = () => {},
 } = {}) {
   const rated = streams.filter((s) => s && typeof s === 'object').map((s) => {
     // One stream this code can't read is passed through as it came, not allowed to sink the list.
     try {
       const r = rate(s, { profile, runtimeMin, facts: factsFor(s) });
+      onRated(s, r);
       return { s: decorate(s, r, { style: display, cached: cachedFor(s) }), stars: r.stars };
     } catch {
       return { s, stars: 0 };
