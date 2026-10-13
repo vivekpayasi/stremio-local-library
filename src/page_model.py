@@ -126,12 +126,15 @@ def _summary(t):
 
 def up_next(sessions, details, titles, jobs):
     """The episode to watch next: after the one playing, else after the one played last, else after the furthest one
-    on the Mac of the most recently used series. None when there is no series to follow."""
-    for s in sessions:
+    on the Mac of the most recently used series. None when there is no series to follow, or the most recent episode
+    is the last of its pack (an older session's next would be the episode just watched)."""
+    s = next((s for s in sessions if episode_key(s.get('file'))), None)
+    if s:
         n = s.get('next')
-        if n:
-            t = details.get(title_key(s['ih'], titles))
-            return _next_card(t, s['ih'], n['idx'], n['name'], n['length'], n['done'], s, jobs)
+        if not n:
+            return None
+        t = details.get(title_key(s['ih'], titles))
+        return _next_card(t, s['ih'], n['idx'], n['name'], n['length'], n['done'], s, jobs)
     for t in sorted(details.values(), key=lambda t: -t['last_used']):
         e = next((e for e in t['episodes'] if e['next']), None)
         if e:

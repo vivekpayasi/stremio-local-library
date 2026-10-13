@@ -123,10 +123,10 @@ class Library(unittest.TestCase):
         self.assertEqual(details['tt7366338']['ihs'], [PACK, 'e' * 40])
 
 
-def session(idx=2, live=True, nxt=3):
+def session(idx=2, live=True, nxt=3, file='Chernobyl - S01E03 - Open Wide, O Earth ' + ACCID):
     files = {3: ('Chernobyl - S01E04 - The Happiness of All Mankind ' + ACCID, 6.4)}
     n = {'idx': nxt, 'label': 'S01E04', 'name': files[3][0], 'length': int(files[3][1] * GB), 'done': 0.0} if nxt is not None else None
-    return {'ih': PACK, 'idx': idx, 'live': live, 'title': 'Chernobyl', 'poster': 'P', 'next': n}
+    return {'ih': PACK, 'idx': idx, 'live': live, 'title': 'Chernobyl', 'poster': 'P', 'file': file, 'next': n}
 
 
 class UpNext(unittest.TestCase):
@@ -154,6 +154,19 @@ class UpNext(unittest.TestCase):
     def test_a_movie_or_the_last_episode_has_no_next(self):
         _, details = pm.library(rows()[1:], TITLES, [])
         self.assertIsNone(pm.up_next([dict(session(), ih=BEN, idx=0, next=None)], details, TITLES, []))
+
+    def test_the_last_episode_playing_is_not_offered_from_an_older_session(self):
+        _, details = pm.library(rows(), TITLES, [])
+        last = session(idx=4, nxt=None, file='Chernobyl - S01E05 - Vichnaya Pamyat ' + ACCID)
+        before = dict(session(idx=3, live=False, file='Chernobyl - S01E04 - The Happiness of All Mankind ' + ACCID), next={
+            'idx': 4, 'label': 'S01E05', 'name': 'Chernobyl - S01E05 - Vichnaya Pamyat ' + ACCID, 'length': int(6.4 * GB), 'done': 0.3})
+        self.assertIsNone(pm.up_next([last, before], details, TITLES, []), 'the end of the pack: nothing is up next')
+
+    def test_a_movie_playing_leaves_up_next_to_the_series_watched_before(self):
+        _, details = pm.library(rows(), TITLES, [])
+        movie = dict(session(), ih=BEN, idx=0, next=None, file='Obsession.2026.2160p.WEB-DL.mp4')
+        u = pm.up_next([movie, session(live=False)], details, TITLES, [])
+        self.assertEqual(u['label'], 'S01E04')
 
 
 def live(**over):
