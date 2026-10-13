@@ -775,6 +775,21 @@ class DownloadForLater(unittest.TestCase):
         self.assertEqual(row['next']['label'], 'S01E03')
         self.assertEqual(row['next']['idx'], 2)
 
+    def test_the_state_carries_the_page_model(self):
+        import time as _t
+        snap = dict(SNAP, ih=self.IH, idx=0, file='Show.S01E02.mkv', size=8 * MB, file_offset=0, pos_at=_t.time())
+        d = self.dash(FakePrefetcher(), sessions=[snap])
+        d.slow['cache'] = {'used': 8 * MB, 'budget': 15 * 1024 * MB, 'free': 50 * 1024 * MB}
+        d.slow['cache_list'] = cache_entries(self.dir, set(), {})
+        state = d.state()
+        self.assertEqual([s['id'] for s in state['chain']], ['swarm', 'mac', 'wifi', 'tv'])
+        self.assertEqual(state['glance']['title'], 'Chernobyl - S01 [Accid]', 'no advisor record: the torrent\'s name')
+        self.assertEqual(state['up_next']['label'], 'S01E03')
+        self.assertEqual([t['key'] for t in state['shelf']['items']], ['ih:' + self.IH])
+        self.assertIn('ih:' + self.IH, state['titles'])
+        self.assertEqual(state['recent']['live'], True)
+        self.assertIsNone(self.dash().state()['shelf'], 'before the cache is first read')
+
 
 class TvAddress(unittest.TestCase):
     def test_the_last_device_that_polled_like_a_stremio_client(self):

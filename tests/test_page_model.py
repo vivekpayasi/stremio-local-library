@@ -251,5 +251,47 @@ class Chain(unittest.TestCase):
         self.assertIsNone(pm.usual_ping(history[:3], now), 'too few readings to say')
 
 
+def summary(**over):
+    s = {'ih': PACK, 'idx': 2, 'live': True, 'complete': False, 'title': 'Chernobyl', 'subtitle': 'Season 1, episode 3',
+         'poster': 'P', 'file': 'Chernobyl - S01E03 - Open Wide, O Earth ' + ACCID, 'position': 0.384, 'position_s': 1510.0,
+         'duration_s': 3930.0, 'ahead_bytes': 500 * MB, 'ahead_end': 0.45, 'ahead_s': 260.0, 'bitrate_mbps': 15.0,
+         'download_mbps': 31.0, 'peers': {'connected': 38, 'sending': 12, 'seeds': 30}, 'strip': [1.0] * 54 + [0.0] * 66,
+         'chips': ['MKV', 'HEVC', '4K', 'Dolby Vision 8', 'AC3 + 1 more'], 'verified': True, 'mp4_fix': None,
+         'events': [{'kind': 'seek', 'pos': 0.38, 'at': 1, 'text': 'Jumped to 25:00', 'cause': None, 'recent': False}],
+         'history': [[1.0, 250.0, 30.0, 480.0]], 'health': {'level': 'good', 'text': 'Playing smoothly, 4:20 buffered ahead'}}
+    s.update(over)
+    return s
+
+
+class Glance(unittest.TestCase):
+    def test_what_the_glance_says(self):
+        g = pm.glance(summary(), TITLES)
+        self.assertEqual({k: g[k] for k in ('title', 'subtitle', 'backdrop', 'level', 'word', 'ahead', 'elapsed', 'remaining', 'stats', 'seeks')},
+                         {'title': 'Chernobyl', 'subtitle': 'Season 1 · Episode 3 · Open Wide, O Earth', 'backdrop': 'BG',
+                          'level': 'good', 'word': 'Smooth', 'ahead': '4 min 20 s', 'elapsed': '25:10', 'remaining': '−40:20',
+                          'stats': '31 Mbps · file needs 15 · 38 peers', 'seeks': [0.38]})
+
+    def test_words_for_each_state(self):
+        words = [pm.glance(summary(health=h), TITLES)['word'] for h in (
+            {'level': 'bad', 'text': 'Stalled, waiting for pieces (8 s)'}, {'level': 'idle', 'text': 'Starting, getting the first pieces (4 s)'},
+            {'level': 'warn', 'text': 'Buffering after a jump (4 s)'}, {'level': 'warn', 'text': 'Buffer is low'},
+            {'level': 'warn', 'text': 'The TV\'s Wi-Fi is slow to answer — playback may stutter'})]
+        self.assertEqual(words, ['Stalled', 'Starting', 'Buffering', 'Low buffer', 'Smooth'])
+
+    def test_without_bitrate_or_duration_and_a_movie(self):
+        g = pm.glance(summary(ahead_s=None, duration_s=None, position_s=None, bitrate_mbps=None, ih=BEN, idx=0,
+                              file='Obsession.2026.2160p.WEB-DL.mp4', subtitle='2026',
+                              mp4_fix='Hiding 2 subtitle tracks stored away from the video, so the player doesn\'t jump around the file'), TITLES)
+        self.assertEqual((g['ahead'], g['elapsed'], g['remaining'], g['stats'], g['subtitle']),
+                         ('500 MB', '38%', None, '31 Mbps · 38 peers', '2026'))
+        self.assertIn('subtitles fixed', g['chips'])
+
+    def test_recent(self):
+        r = pm.recent(summary())
+        self.assertEqual((r['live'], r['unit'], len(r['history']), r['events'][0]['kind']), (True, 's', 1, 'seek'))
+        self.assertEqual(pm.recent(summary(ahead_s=None))['unit'], 'MB')
+        self.assertIsNone(pm.recent(None))
+
+
 if __name__ == '__main__':
     unittest.main()

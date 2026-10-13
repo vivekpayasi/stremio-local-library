@@ -337,3 +337,48 @@ def usual_ping(history, now):
     """The median ping to the TV over the last hour, or None with fewer than 5 readings."""
     recent = [ms for at, ms in history if now - at <= 3600]
     return float(statistics.median(recent)) if len(recent) >= 5 else None
+
+
+def _word(h):
+    text = h.get('text', '')
+    if h.get('level') == 'bad':
+        return 'Stalled'
+    for start, word in (('Starting', 'Starting'), ('Buffering', 'Buffering'), ('Buffer is low', 'Low buffer'),
+                        ('The player keeps', 'Re-reading')):
+        if text.startswith(start):
+            return word
+    return 'Smooth'
+
+
+def glance(s, titles):
+    """The live stream as the top of the page shows it."""
+    t = titles.get(f"{s['ih']}:{s['idx']}") or titles.get(s['ih']) or {}
+    meta = titles.get('meta:' + t['imdb'], {}) if t.get('imdb') else {}
+    k = episode_key(s['file'])
+    if k:
+        name = (meta.get('episodes') or {}).get(f'{k[0]}:{k[1]}') or episode_title(s['file'])
+        subtitle = ' · '.join(x for x in (f'Season {k[0]}', f'Episode {k[1]}', name) if x)
+    else:
+        subtitle = s.get('subtitle')
+    h = s.get('health') or {}
+    pos, dur = s.get('position_s'), s.get('duration_s')
+    need = s.get('bitrate_mbps')
+    stats = ' · '.join(x for x in (f"{s['download_mbps']:.0f} Mbps", f'file needs {need:.0f}' if need else None,
+                                   f"{s['peers']['connected']} peers") if x)
+    fixed = bool(s.get('mp4_fix') and s['mp4_fix'].startswith('Hiding'))
+    return {'ih': s['ih'], 'idx': s['idx'], 'title': s['title'], 'subtitle': subtitle, 'poster': s.get('poster') or t.get('poster'),
+            'backdrop': meta.get('background'), 'level': h.get('level') or 'good', 'word': _word(h),
+            'ahead': spoken(s['ahead_s']) if s.get('ahead_s') is not None else size(s['ahead_bytes']),
+            'complete': s['complete'], 'position': s['position'], 'ahead_end': s['ahead_end'], 'strip': s['strip'],
+            'seeks': [e['pos'] for e in s.get('events') or [] if e['kind'] == 'seek' and e.get('pos') is not None],
+            'elapsed': clock(pos) if pos is not None else f"{s['position']:.0%}",
+            'remaining': '−' + clock(dur - pos) if dur and pos is not None else None, 'duration_s': dur,
+            'stats': stats, 'chips': list(s['chips']) + (['subtitles fixed'] if fixed else []), 'verified': s['verified']}
+
+
+def recent(s):
+    """The buffer's recent history and the stream's events, for the Recent section."""
+    if not s:
+        return None
+    return {'live': s['live'], 'unit': 's' if s.get('ahead_s') is not None else 'MB', 'history': s.get('history') or [],
+            'events': s.get('events') or []}

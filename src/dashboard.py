@@ -18,6 +18,7 @@ from collections import deque
 from pathlib import Path
 
 from media_text import EPISODE, SAMPLE, VIDEO, clock, episode_key, episode_label, next_episode  # noqa: F401 (re-exported for tests)
+import page_model
 from prefetch import ACTIVE as JOB_ACTIVE
 
 MB = 1024 * 1024
@@ -642,6 +643,7 @@ class Dashboard:
         self.slow = {'mac_wifi': None, 'tv_ping': None, 'tv': None, 'library': None, 'advisor': None,
                      'process': None, 'cache': None, 'autoheal': None}
         self.history = {}      # ih:idx -> deque of (time, ahead_s, download_mbps, ahead_mb)
+        self.pings = deque(maxlen=720)   # (time, ms) of answered pings to the TV, an hour's worth: the "usually" figure
         self.seen = {}         # ih:idx -> (last summary, when) — what was played, after its torrent left the session
         self.titles = {'mtime': None, 'data': {}}
         self.adb = shutil.which('adb', path=os.environ.get('PATH', '') + ':/opt/homebrew/bin:/usr/local/bin')
@@ -773,6 +775,9 @@ class Dashboard:
     def _ping(self):
         ip = self.tv_ip()
         self.slow['tv_ping'] = dict(parse_ping(_run(['ping', '-c', '3', '-i', '0.2', '-t', '3', ip], 6)), ip=ip) if ip else None
+        ms = (self.slow['tv_ping'] or {}).get('ms')
+        if ms is not None:
+            self.pings.append((time.time(), ms))
 
     def _mac_wifi(self):
         self.slow['mac_wifi'] = parse_mac_wifi(_run(['system_profiler', 'SPAirPortDataType'], 20))
@@ -869,6 +874,18 @@ class Dashboard:
         for s in out:
             s['next'] = next_episode(self._files(s['ih']), s['idx'])
         lan_ip = (self.slow.get('tv_ping') or {}).get('ip')
+        jobs = self.prefetcher.jobs() if self.prefetcher else []
+        rows = self.slow.get('cache_list')
+        shelf, details = page_model.library(rows or [], titles, jobs)
+        live = next((s for s in out if s['live']), None)
+        cache = self.slow.get('cache') or {}
+        server = {**(self.slow.get('process') or {}), 'uptime_s': round(now - self.started),
+                  'download_cap_mbps': self.config.get('download_limit_mbps'), 'learning': self.config.get('learn_from_plays')}
+        chain = [page_model.swarm_step(live, jobs),
+                 page_model.mac_step(server, cache, self._library_view(), self.config.get('min_free_gb', 3) * 1024 * MB),
+                 page_model.wifi_step(self.slow.get('mac_wifi'), self.slow.get('tv_ping'), page_model.usual_ping(self.pings, now),
+                                      self.slow.get('tv'), live is not None),
+                 page_model.tv_step(self.slow.get('tv'), live, now)]
         return {
             'now': now,
             'phone_url': self.phone_url() if self.config.get('dashboard_lan') else None,
@@ -880,9 +897,19 @@ class Dashboard:
             'network': {'mac_wifi': self.slow.get('mac_wifi'), 'tv_ping': self.slow.get('tv_ping'), 'tv_ip': lan_ip},
             'tv': self.slow.get('tv'),
             'cache': self.slow.get('cache_list'),
-            'prefetch': self.prefetcher.jobs() if self.prefetcher else [],
+            'prefetch': jobs,
             'library': self._library_view(),
             'log': filter_log(_tail(self.dir / 'torrent.log')),
+            'problem': page_model.problem(chain),
+            'glance': page_model.glance(live, titles) if live else None,
+            'idle_text': 'Nothing is playing',
+            'up_next': page_model.up_next(out, details, titles, jobs),
+            'shelf': None if rows is None else {
+                'used': cache.get('used'), 'budget': cache.get('budget'), 'free': cache.get('free'), 'items': shelf,
+                'idle_bytes': sum(r['bytes'] for r in rows if not r['in_use']), 'idle_count': sum(1 for r in rows if not r['in_use'])},
+            'titles': details,
+            'chain': chain,
+            'recent': page_model.recent(live or (out[0] if out else None)),
         }
 
     def _library_view(self):
