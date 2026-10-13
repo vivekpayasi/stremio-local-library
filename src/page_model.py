@@ -199,23 +199,28 @@ def swarm_step(live, jobs):
     return _step('swarm', 'Swarm', 'idle', 'Nothing streaming right now')
 
 
-def mac_step(server, cache, library, min_free):
-    """This Mac: the torrent server, the cache and the disk, and the services running here."""
+def mac_step(server, cache, library, min_free, checked=True):
+    """This Mac: the torrent server, the cache and the disk, and the services running here. `checked`: whether the
+    library has been asked yet — until then (the first seconds after a start) no answer is not a problem."""
     lib = library or {}
     adv, acct = lib.get('advisor'), lib.get('account')
+    down = 'bad' if checked else 'idle'
+    silent = 'Not answering' if checked else 'Checking…'
+    cpu = server.get('cpu')
     services = [
-        {'name': 'Torrent server', 'level': 'good', 'text': f"{server.get('cpu') or 0:.0f}% CPU, {server.get('rss_mb') or 0} MB"},
-        {'name': 'Library', 'level': 'good' if library else 'bad',
-         'text': f"{lib.get('movies') or 0} movies, {lib.get('shows') or 0} shows" if library else 'Not answering'},
-        {'name': 'Stream Advisor', 'level': ('good' if adv else 'idle') if library else 'bad',
-         'text': f"Rating streams for {adv['profile']}" if adv else ('Off' if library else 'Not answering')},
+        {'name': 'Torrent server', 'level': 'good',
+         'text': f"{cpu:.0f}% CPU, {server.get('rss_mb') or 0} MB" if cpu is not None else 'Checking…'},
+        {'name': 'Library', 'level': 'good' if library else down,
+         'text': f"{lib.get('movies') or 0} movies, {lib.get('shows') or 0} shows" if library else silent},
+        {'name': 'Stream Advisor', 'level': ('good' if adv else 'idle') if library else down,
+         'text': f"Rating streams for {adv['profile']}" if adv else ('Off' if library else silent)},
         {'name': 'Stremio account', 'level': ('good' if acct['ok'] else 'warn') if acct else 'idle',
          'text': acct['text'] if acct else 'Not checked yet'},
     ]
     used, budget, free = cache.get('used') or 0, cache.get('budget') or 0, cache.get('free')
     line = f"up {spoken(server.get('uptime_s') or 0)} · cache {size(used)} of {size(budget)}" + (f' · {size(free)} free' if free is not None else '')
     reason = advice = None
-    if not library:
+    if not library and checked:
         reason = 'The Local Library addon isn\'t answering'
         advice = 'Local files aren\'t served and streams aren\'t rated until it\'s back; it restarts by itself.'
     elif acct and not acct['ok']:
@@ -231,8 +236,9 @@ def mac_step(server, cache, library, min_free):
     return _step('mac', 'This Mac', level, line, reason, advice, details, services)
 
 
-def wifi_step(mac_wifi, tv_ping, usual, tv, playing):
-    """Wi-Fi: the Mac's link and the TV's answer to ping. Judged only while something plays."""
+def wifi_step(mac_wifi, tv_ping, usual, tv, playing, checked=True):
+    """Wi-Fi: the Mac's link and the TV's answer to ping. Judged only while something plays. `checked`: whether the
+    Mac's Wi-Fi has been read yet."""
     parts, details = [], []
     level, reason, advice = 'good', None, None
     if mac_wifi and mac_wifi.get('rssi') is not None:
@@ -243,7 +249,7 @@ def wifi_step(mac_wifi, tv_ping, usual, tv, playing):
             level, reason = 'warn', 'The Mac\'s Wi-Fi signal is weak'
             advice = 'The stream crosses the Wi-Fi twice; Ethernet for the Mac, or the router closer, helps.'
     else:
-        parts.append('Mac not on Wi-Fi')
+        parts.append('Mac not on Wi-Fi' if checked else 'Checking this Mac\'s Wi-Fi…')
     ms = (tv_ping or {}).get('ms')
     if ms is not None:
         parts.append(f'ping to the TV {ms:.0f} ms')

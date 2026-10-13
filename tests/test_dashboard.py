@@ -791,6 +791,11 @@ class DownloadForLater(unittest.TestCase):
         self.assertIsNone(self.dash().state()['shelf'], 'before the cache is first read')
 
 
+    def test_the_first_poll_after_a_start_raises_no_alarm(self):
+        state = self.dash().state()
+        self.assertIsNone(state['problem'], 'the library is not read yet, not down')
+        self.assertEqual([v['level'] for v in state['chain'][1]['services']][1:3], ['idle', 'idle'])
+
 class TvAddress(unittest.TestCase):
     def test_the_last_device_that_polled_like_a_stremio_client(self):
         text = '\n'.join([

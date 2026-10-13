@@ -225,6 +225,16 @@ class Chain(unittest.TestCase):
         full = pm.mac_step(SERVER, dict(CACHE, free=2 * GB), LIB, 3 * GB)
         self.assertEqual((full['level'], full['reason']), ('warn', 'Only 2.0 GB free on the disk'))
 
+    def test_before_the_first_readings_nothing_is_called_down(self):
+        m = pm.mac_step({'uptime_s': 5}, CACHE, None, 3 * GB, checked=False)
+        self.assertEqual((m['level'], m['reason']), ('good', None))
+        self.assertEqual([(v['name'], v['level'], v['text']) for v in m['services']][:3],
+                         [('Torrent server', 'good', 'Checking…'), ('Library', 'idle', 'Checking…'), ('Stream Advisor', 'idle', 'Checking…')])
+        self.assertIsNone(pm.problem([m]))
+        self.assertEqual(pm.mac_step(SERVER, CACHE, None, 3 * GB)['level'], 'warn', 'once read, no answer is down')
+        w = pm.wifi_step(None, None, None, None, True, checked=False)
+        self.assertEqual(w['line'], 'Checking this Mac\'s Wi-Fi…')
+
     def test_wifi_is_judged_while_something_plays(self):
         w = pm.wifi_step(WIFI, {'ms': 4.0, 'loss': 0, 'ip': '192.168.0.100'}, 4.0, TV_OK, True)
         self.assertEqual((w['level'], w['line']), ('good', 'Mac on 5GHz, −42 dBm, excellent · ping to the TV 4 ms · TV −58 dBm, good'))

@@ -644,6 +644,7 @@ class Dashboard:
                      'process': None, 'cache': None, 'autoheal': None}
         self.history = {}      # ih:idx -> deque of (time, ahead_s, download_mbps, ahead_mb)
         self.pings = deque(maxlen=720)   # (time, ms) of answered pings to the TV, an hour's worth: the "usually" figure
+        self.read = set()      # the slow readings taken at least once: until then a missing one is "not read yet", not "down"
         self.seen = {}         # ih:idx -> (last summary, when) — what was played, after its torrent left the session
         self.titles = {'mtime': None, 'data': {}}
         self.adb = shutil.which('adb', path=os.environ.get('PATH', '') + ':/opt/homebrew/bin:/usr/local/bin')
@@ -669,6 +670,7 @@ class Dashboard:
                         fn()
                     except Exception as e:
                         self.log(f'dashboard: {name} failed: {type(e).__name__}: {e}')
+                    self.read.add(name)
 
     def _process(self):
         out = _run(['ps', '-o', '%cpu=,rss=', '-p', str(os.getpid())]).split()
@@ -882,9 +884,10 @@ class Dashboard:
         server = {**(self.slow.get('process') or {}), 'uptime_s': round(now - self.started),
                   'download_cap_mbps': self.config.get('download_limit_mbps'), 'learning': self.config.get('learn_from_plays')}
         chain = [page_model.swarm_step(live, jobs),
-                 page_model.mac_step(server, cache, self._library_view(), self.config.get('min_free_gb', 3) * 1024 * MB),
+                 page_model.mac_step(server, cache, self._library_view(), self.config.get('min_free_gb', 3) * 1024 * MB,
+                                     checked='library' in self.read),
                  page_model.wifi_step(self.slow.get('mac_wifi'), self.slow.get('tv_ping'), page_model.usual_ping(self.pings, now),
-                                      self.slow.get('tv'), live is not None),
+                                      self.slow.get('tv'), live is not None, checked='mac_wifi' in self.read),
                  page_model.tv_step(self.slow.get('tv'), live, now)]
         return {
             'now': now,
