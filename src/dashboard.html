@@ -203,7 +203,7 @@ details.log { margin-top: 22px; }
       <section class="glance idle" id="glance-wrap" aria-label="Now playing"><div class="bd-wrap" id="glance-bg"></div><div id="glance"></div></section>
       <div class="pair solo" id="pair">
         <section class="cine upnext" id="upnext-wrap" aria-label="Up next" hidden><div class="bd-wrap" id="upnext-bg"></div><div id="upnext"></div></section>
-        <section class="shelf-sec" id="shelf" aria-label="On this Mac"></section>
+        <section class="shelf-sec" aria-label="On this Mac"><div id="shelf-head"></div><div id="shelf-tiles"></div><div id="shelf-foot"></div></section>
       </div>
     </div>
     <aside class="side">
@@ -349,15 +349,25 @@ function tileText(t) {
   return `<span class="t-name">${esc(t.title)}</span><span class="t-sum">${esc(t.summary)}</span>${t.sub ? `<span class="t-sub">${esc(t.sub)}</span>` : ''}`;
 }
 
-// The tiles' images sit in the structure, which changes only when the titles do; their text is written separately.
-function shelfHTML(sh) {
+// The shelf is three regions, so the figures in its head and foot change without touching the tiles: their images sit
+// in a structure that changes only when the titles do (posters aren't reloaded, the row keeps its scroll), and their
+// text is written separately.
+function shelfHead(sh) {
   if (!sh) return '<h2 class="eyebrow">On this Mac</h2><p class="muted small">Reading the cache…</p>';
   const used = sh.used || 0, budget = sh.budget || 1;
-  const head = `<div class="sh-head"><h2 class="eyebrow">On this Mac</h2><span class="muted small">${bytes(used)} of ${bytes(budget)} · ${bytes(sh.free)} free</span></div>
+  return `<div class="sh-head"><h2 class="eyebrow">On this Mac</h2><span class="muted small">${bytes(used)} of ${bytes(budget)} · ${bytes(sh.free)} free</span></div>
     <span class="bar space" role="img" aria-label="${Math.round(used / budget * 100)}% of the cache used"><b style="width:${Math.min(100, used / budget * 100).toFixed(1)}%"></b></span>`;
-  if (!sh.items.length) return `${head}<p class="muted small">Nothing is stored. What you play is kept here for rewinds and re-watching.</p>`;
-  return `${head}<ul class="shelf">${sh.items.map((t) => `<li><button class="tile" type="button" data-open="${esc(t.key)}">${poster(t.poster, t.title)}<span id="${tileId(t.key)}"></span></button></li>`).join('')}</ul>
-    ${sh.idle_count ? `<button class="ghost danger wide" type="button" data-clear="${sh.idle_count}" data-size="${esc(bytes(sh.idle_bytes))}">Delete everything not in use (${bytes(sh.idle_bytes)})</button>` : ''}
+}
+
+function shelfTiles(sh) {
+  if (!sh) return '';
+  if (!sh.items.length) return '<p class="muted small">Nothing is stored. What you play is kept here for rewinds and re-watching.</p>';
+  return `<ul class="shelf">${sh.items.map((t) => `<li><button class="tile" type="button" data-open="${esc(t.key)}">${poster(t.poster, t.title)}<span id="${tileId(t.key)}"></span></button></li>`).join('')}</ul>`;
+}
+
+function shelfFoot(sh) {
+  if (!sh) return '';
+  return `${sh.idle_count ? `<button class="ghost danger wide" type="button" data-clear="${sh.idle_count}" data-size="${esc(bytes(sh.idle_bytes))}">Delete everything not in use (${bytes(sh.idle_bytes)})</button>` : ''}
     ${note('shelf')}`;
 }
 
@@ -560,7 +570,9 @@ function render(state) {
   $('pair').className = u ? 'pair' : 'pair solo';
   put('upnext-bg', u ? backdrop(u.backdrop, u.poster) : '');
   put('upnext', upNextHTML(u));
-  put('shelf', shelfHTML(state.shelf));
+  put('shelf-head', shelfHead(state.shelf));
+  put('shelf-tiles', shelfTiles(state.shelf));
+  put('shelf-foot', shelfFoot(state.shelf));
   for (const t of (state.shelf && state.shelf.items) || []) put(tileId(t.key), tileText(t));
   renderSheet();
   put('chain', chainHTML(state.chain));

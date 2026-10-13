@@ -128,15 +128,27 @@ test('Up next offers the episode, then shows its download, then that it is ready
   assert.equal(ctx.upNextHTML(null), '');
 });
 
+const SHELF = { used: 4.4 * GB, budget: 15 * GB, free: 22 * GB, idle_bytes: 3.8 * GB, idle_count: 1,
+  items: [{ key: 'tt7366338', title: 'Chernobyl', kind: 'series', poster: 'P', summary: 'S1 · 1 episode here', sub: 'E4 downloading 34%', last_used: 1, bytes: 1 }] };
+
 test('the shelf: one tile per title, the space, and clearing what is not in use', () => {
   const { ctx } = page();
-  const sh = { used: 4.4 * GB, budget: 15 * GB, free: 22 * GB, idle_bytes: 3.8 * GB, idle_count: 1,
-    items: [{ key: 'tt7366338', title: 'Chernobyl', kind: 'series', poster: 'P', summary: 'S1 · 1 episode here', sub: 'E4 downloading 34%', last_used: 1, bytes: 1 }] };
-  const h = ctx.shelfHTML(sh);
-  assert.ok(h.includes('4.4 GB of 15 GB') && h.includes('data-open="tt7366338"') && h.includes('Delete everything not in use (3.8 GB)'));
-  assert.ok(ctx.tileText(sh.items[0]).includes('E4 downloading 34%'));
-  assert.ok(ctx.shelfHTML({ ...sh, items: [] }).includes('Nothing is stored'));
-  assert.ok(ctx.shelfHTML(null).includes('Reading the cache'));
+  assert.ok(ctx.shelfHead(SHELF).includes('4.4 GB of 15 GB'));
+  assert.ok(ctx.shelfTiles(SHELF).includes('data-open="tt7366338"'));
+  assert.ok(ctx.shelfFoot(SHELF).includes('Delete everything not in use (3.8 GB)'));
+  assert.ok(ctx.tileText(SHELF.items[0]).includes('E4 downloading 34%'));
+  assert.ok(ctx.shelfTiles({ ...SHELF, items: [] }).includes('Nothing is stored'));
+  assert.ok(ctx.shelfHead(null).includes('Reading the cache'));
+});
+
+test('the shelf\'s posters are not rewritten when only the cache figures change', () => {
+  const { ctx, els } = page();
+  ctx.render({ ...STATE, shelf: SHELF });
+  assert.ok(els['shelf-tiles'].innerHTML.includes('src="P"'));
+  els['shelf-tiles'].innerHTML = 'untouched';
+  ctx.render({ ...STATE, shelf: { ...SHELF, used: 4.6 * GB, free: 21.8 * GB, idle_bytes: 4 * GB } });
+  assert.equal(els['shelf-tiles'].innerHTML, 'untouched', 'posters stay, and the row keeps its scroll');
+  assert.ok(els['shelf-head'].innerHTML.includes('4.6 GB of 15 GB') && els['shelf-foot'].innerHTML.includes('(4 GB)'));
 });
 
 test('a series sheet: every episode with its one action, the next one filled', () => {
