@@ -122,5 +122,38 @@ class Library(unittest.TestCase):
         self.assertEqual(details['tt7366338']['ihs'], [PACK, 'e' * 40])
 
 
+def session(idx=2, live=True, nxt=3):
+    files = {3: ('Chernobyl - S01E04 - The Happiness of All Mankind ' + ACCID, 6.4)}
+    n = {'idx': nxt, 'label': 'S01E04', 'name': files[3][0], 'length': int(files[3][1] * GB), 'done': 0.0} if nxt is not None else None
+    return {'ih': PACK, 'idx': idx, 'live': live, 'title': 'Chernobyl', 'poster': 'P', 'next': n}
+
+
+class UpNext(unittest.TestCase):
+    def test_after_the_episode_playing(self):
+        _, details = pm.library(rows(), TITLES, [])
+        u = pm.up_next([session()], details, TITLES, [])
+        self.assertEqual({k: u[k] for k in ('key', 'label', 'season', 'episode', 'name', 'state', 'backdrop', 'idx')},
+                         {'key': 'tt7366338', 'label': 'S01E04', 'season': 1, 'episode': 4, 'name': 'The Happiness of All Mankind',
+                          'state': 'not_here', 'backdrop': 'BG', 'idx': 3})
+
+    def test_its_download_and_when_it_is_here(self):
+        jobs = [job(PACK, 3, 'S01E04')]
+        _, details = pm.library(rows(), TITLES, jobs)
+        u = pm.up_next([session()], details, TITLES, jobs)
+        self.assertEqual((u['state'], u['done'], u['job']['mbps']), ('downloading', 0.34, 21.3))
+        done = [dict(job(PACK, 3, 'S01E04', 'done', 1.0))]
+        _, details = pm.library(rows(), TITLES, done)
+        self.assertEqual(pm.up_next([session()], details, TITLES, done)['state'], 'ready')
+
+    def test_without_a_session_it_follows_the_most_recent_series_on_the_mac(self):
+        _, details = pm.library(rows(), TITLES, [])
+        u = pm.up_next([], details, TITLES, [])
+        self.assertEqual((u['label'], u['name'], u['title']), ('S01E04', 'The Happiness of All Mankind', 'Chernobyl'))
+
+    def test_a_movie_or_the_last_episode_has_no_next(self):
+        _, details = pm.library(rows()[1:], TITLES, [])
+        self.assertIsNone(pm.up_next([dict(session(), ih=BEN, idx=0, next=None)], details, TITLES, []))
+
+
 if __name__ == '__main__':
     unittest.main()

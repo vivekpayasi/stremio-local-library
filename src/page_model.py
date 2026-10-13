@@ -122,3 +122,35 @@ def _summary(t):
     if r['done'] >= 0.01:
         return f"Movie · {int(r['done'] * 100)}% here · {size(t['bytes'])}", sub
     return 'Movie · nothing downloaded', sub
+
+
+def up_next(sessions, details, titles, jobs):
+    """The episode to watch next: after the one playing, else after the one played last, else after the furthest one
+    on the Mac of the most recently used series. None when there is no series to follow."""
+    for s in sessions:
+        n = s.get('next')
+        if n:
+            t = details.get(title_key(s['ih'], titles))
+            return _next_card(t, s['ih'], n['idx'], n['name'], n['length'], n['done'], s, jobs)
+    for t in sorted(details.values(), key=lambda t: -t['last_used']):
+        e = next((e for e in t['episodes'] if e['next']), None)
+        if e:
+            return _next_card(t, e['ih'], e['idx'], e['file'], e['length'], e['done'], None, jobs)
+    return None
+
+
+def _next_card(t, ih, idx, file_name, length, done, s, jobs):
+    t, s = t or {}, s or {}
+    e = next((e for e in t.get('episodes', []) if e['ih'] == ih and e['idx'] == idx), {})
+    job = _job_for(jobs, ih, idx)
+    done = max([done, e.get('done', 0)] + ([job['done']] if job else []))
+    season, episode = episode_key(file_name)
+    if job and job['state'] in ACTIVE + ('failed',):
+        state = job['state']
+    elif done >= 1 or (job and job['state'] == 'done'):
+        state = 'ready'
+    else:
+        state = 'not_here'
+    return {'key': t.get('key'), 'ih': ih, 'idx': idx, 'title': t.get('title') or s.get('title'), 'season': season, 'episode': episode,
+            'label': episode_label(file_name), 'name': e.get('name') or episode_title(file_name), 'length': length, 'done': done,
+            'job': job, 'state': state, 'poster': t.get('poster') or s.get('poster'), 'backdrop': t.get('backdrop')}
