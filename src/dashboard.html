@@ -319,6 +319,177 @@ function glanceHTML(g, idleText) {
   </div>`;
 }
 
+// ---------------------------------------------------------------- up next, the shelf, title sheets
+
+function upNextHTML(u) {
+  if (!u) return '';
+  const key = `${u.ih}:${u.idx}`;
+  let body;
+  if (ACTIVE.includes(u.state)) {
+    body = `<span class="bar" role="img" aria-label="${pct(u.done)}% downloaded"><b style="width:${(u.done * 100).toFixed(1)}%"></b></span>
+      <p class="muted small">${esc(jobLine(u.job))}</p>
+      <button class="ghost" type="button" data-cancel="${esc(u.ih)}" data-idx="${u.idx}">Cancel</button>`;
+  } else if (u.state === 'ready') {
+    body = `<p class="small">${lv('good', 'On this Mac — ready to watch')}</p>`;
+  } else {
+    const left = u.length * (1 - u.done);
+    const failed = u.state === 'failed' && u.job && u.job.message ? ` · the last try stopped: ${esc(u.job.message)}` : '';
+    body = `<p class="muted small">${u.done >= 0.01 ? `${bytes(left)} to go, ${pct(u.done)}% is here` : bytes(u.length)}${failed}</p>
+      <button class="solid" type="button" data-get="${esc(u.ih)}" data-idx="${u.idx}" data-label="${esc(u.label)}" data-left="${Math.round(left)}">${u.done >= 0.01 ? 'Download the rest' : 'Download for later'}</button>`;
+  }
+  return `<div class="un-body"><h2 class="eyebrow">Up next</h2>
+    <p class="un-show">${esc(u.title)} · Season ${u.season}</p>
+    <p class="un-ep">E${u.episode}${u.name ? ` · ${esc(u.name)}` : ''}</p>
+    ${body}${note(key)}</div>`;
+}
+
+// (Function declarations, not consts: the page tests reach them as properties of the global object.)
+function tileId(key) { return `tile-${String(key).replace(/[^A-Za-z0-9]/g, '')}`; }
+function tileText(t) {
+  return `<span class="t-name">${esc(t.title)}</span><span class="t-sum">${esc(t.summary)}</span>${t.sub ? `<span class="t-sub">${esc(t.sub)}</span>` : ''}`;
+}
+
+// The tiles' images sit in the structure, which changes only when the titles do; their text is written separately.
+function shelfHTML(sh) {
+  if (!sh) return '<h2 class="eyebrow">On this Mac</h2><p class="muted small">Reading the cache…</p>';
+  const used = sh.used || 0, budget = sh.budget || 1;
+  const head = `<div class="sh-head"><h2 class="eyebrow">On this Mac</h2><span class="muted small">${bytes(used)} of ${bytes(budget)} · ${bytes(sh.free)} free</span></div>
+    <span class="bar space" role="img" aria-label="${Math.round(used / budget * 100)}% of the cache used"><b style="width:${Math.min(100, used / budget * 100).toFixed(1)}%"></b></span>`;
+  if (!sh.items.length) return `${head}<p class="muted small">Nothing is stored. What you play is kept here for rewinds and re-watching.</p>`;
+  return `${head}<ul class="shelf">${sh.items.map((t) => `<li><button class="tile" type="button" data-open="${esc(t.key)}">${poster(t.poster, t.title)}<span id="${tileId(t.key)}"></span></button></li>`).join('')}</ul>
+    ${sh.idle_count ? `<button class="ghost danger wide" type="button" data-clear="${sh.idle_count}" data-size="${esc(bytes(sh.idle_bytes))}">Delete everything not in use (${bytes(sh.idle_bytes)})</button>` : ''}
+    ${note('shelf')}`;
+}
+
+function verdictText(v) {
+  const what = v.summary && v.summary.length ? v.summary.join(', ') : '';
+  if (v.symbol === '✓✓') return `Plays here — checked in the file${what ? `: ${what}` : ''}`;
+  if (v.symbol === '✓') return `Plays here${what ? ` — ${what}` : ''}`;
+  if (v.symbol === '✗') return `Won't play here${v.reason ? ` — ${v.reason}` : ''}`;
+  return v.reason || 'Plays, with a caveat';
+}
+const SYM = { '✓✓': 'good', '✓': 'good', '⚠': 'warn', '✗': 'bad' };
+
+// One file's actions: Cancel while it downloads; Delete when it's here; Download (filled for the next episode) when not.
+function actionsFor(x) {
+  const j = x.job;
+  if (j && ACTIVE.includes(j.state)) return `<button class="ghost" type="button" data-cancel="${esc(x.ih)}" data-idx="${x.idx}">Cancel</button>`;
+  if (x.busy) return '<span class="muted small">Being read</span>';
+  const label = x.label || x.group || x.name;
+  const del = `<button class="ghost danger" type="button" data-delfile="${esc(x.ih)}" data-idx="${x.idx}" data-label="${esc(label)}" data-size="${esc(bytes(x.length * x.done))}">Delete</button>`;
+  if (x.done >= 1) return del;
+  const left = x.length * (1 - x.done);
+  const get = `<button class="${x.next ? 'solid' : 'ghost'}" type="button" data-get="${esc(x.ih)}" data-idx="${x.idx}" data-label="${esc(label)}" data-left="${Math.round(left)}">${x.done >= 0.01 ? 'Download the rest' : 'Download'}</button>`;
+  return x.done >= 0.01 ? del + get : get;
+}
+
+function episodeRow(e) {
+  const j = e.job;
+  let state;
+  if (j && ACTIVE.includes(j.state)) state = `<span class="bar"><b style="width:${(e.done * 100).toFixed(1)}%"></b></span>${esc(jobLine(j))}`;
+  else if (e.done >= 1) state = `${lv('good', '')} On the Mac · ${bytes(e.length)}`;
+  else if (e.done >= 0.01) state = `${pct(e.done)}% here · ${bytes(e.length)}`;
+  else state = `Not on the Mac · ${bytes(e.length)}`;
+  return `<li class="ep${e.done >= 0.01 ? ' here' : ''}"><span class="ep-n">${e.episode}</span>
+    <span class="ep-t">${esc(e.name || e.label)}${e.tag ? ` <span class="tag">${esc(e.tag)}</span>` : ''}</span>
+    <span class="ep-s">${state}</span><span class="ep-a">${actionsFor(e)}</span>${note(`${e.ih}:${e.idx}`)}</li>`;
+}
+
+function releaseCard(r, budget) {
+  const v = r.verdict, name = r.group || r.name;
+  const left = r.length * (1 - r.done);
+  const fits = r.bytes + left <= budget;
+  const running = r.job && ACTIVE.includes(r.job.state);
+  const key = `${r.ih}:${r.idx}`;
+  const del = `<button class="ghost danger" type="button" data-del="${esc(r.ih)}" data-key="${esc(key)}" data-label="${esc(name)}" data-size="${esc(bytes(r.bytes))}">Delete</button>`;
+  const get = !running && r.done < 1 && fits && r.length
+    ? `<button class="ghost" type="button" data-get="${esc(r.ih)}" data-idx="${r.idx}" data-label="${esc(name)}" data-left="${Math.round(left)}">Download the rest</button>` : '';
+  const act = running ? `<button class="ghost" type="button" data-cancel="${esc(r.ih)}" data-idx="${r.idx}">Cancel</button>`
+    : r.busy || r.in_use ? '<span class="muted small">In use</span>' : del + get;
+  const now = STATE ? STATE.now : Date.now() / 1000;
+  return `<li class="rel"><div class="rel-h"><b>${esc(name)}</b><span>${r.last_used ? `played ${ago(now - r.last_used)}` : ''}</span></div>
+    ${r.chips.length ? `<ul class="chips">${r.chips.map((c) => `<li>${esc(c)}</li>`).join('')}</ul>` : ''}
+    ${v ? `<p class="verdict"><span class="sym sym-${SYM[v.symbol] || 'warn'}" aria-hidden="true">${esc(v.symbol)}</span> ${esc(verdictText(v))}</p>` : ''}
+    <span class="bar"><b style="width:${(r.done * 100).toFixed(1)}%"></b></span>
+    <div class="rel-f"><span class="muted">${r.job && ACTIVE.includes(r.job.state) ? esc(jobLine(r.job)) : `${bytes(r.length * r.done)} of ${bytes(r.length)} here (${pct(r.done)}%)`}</span>${act}</div>
+    ${!fits && r.done < 1 ? `<p class="muted small">Too big to download fully: the cache keeps ${bytes(budget)}.</p>` : ''}
+    ${note(key)}</li>`;
+}
+
+function sheetHead(t) {
+  return `<div class="sh-top"><button class="back" type="button" data-close aria-label="Back to the dashboard">‹ Back</button>
+    <div class="sh-id">${poster(t.poster, t.title)}<div><h2 id="sheet-title">${esc(t.title)}</h2><p class="sh-meta">${esc(t.meta_line)}</p></div></div></div>`;
+}
+
+function seasonsHTML(t, season) {
+  if (t.kind !== 'series') return '';
+  const n = t.episodes.filter((e) => e.season === season).length;
+  if (t.seasons.length < 2) return `<div class="sh-seasons">Season ${season} · ${n} episode${n === 1 ? '' : 's'}</div>`;
+  return `<div class="sh-seasons"><label class="sr" for="season-pick">Season</label><select id="season-pick">${t.seasons.map((s) => `<option value="${s}"${s === season ? ' selected' : ''}>Season ${s}</option>`).join('')}</select>${n} episode${n === 1 ? '' : 's'}</div>`;
+}
+
+function sheetBody(t, season) {
+  const budget = (STATE && STATE.shelf && STATE.shelf.budget) || Infinity;
+  const all = t.in_use ? '' : `<div class="sheet-foot"><button class="ghost danger wide" type="button" data-delall="${esc(t.key)}" data-size="${esc(bytes(t.bytes))}">${t.kind === 'series' ? `Delete all episodes (${bytes(t.bytes)})` : `Delete all ${t.releases.length} release${t.releases.length === 1 ? '' : 's'} (${bytes(t.bytes)})`}</button>${note(t.key)}</div>`;
+  if (t.kind === 'series') return `<ul class="eps">${t.episodes.filter((e) => e.season === season).map(episodeRow).join('')}</ul>${all}`;
+  return `<ul class="rels">${t.releases.map((r) => releaseCard(r, budget)).join('')}</ul>${all}`;
+}
+
+let sheetKey = null, sheetSeason = null, opener = null;
+
+function defaultSeason(t) {
+  const next = t.episodes.find((e) => e.next);
+  if (next) return next.season;
+  const here = t.episodes.filter((e) => e.done >= 0.01).map((e) => e.season);
+  return here.length ? Math.max(...here) : t.seasons[0];
+}
+
+function renderSheet() {
+  const m = /^#title=(.+)$/.exec(location.hash || '');
+  const key = m ? decodeURIComponent(m[1]) : null;
+  const el = $('sheet');
+  if (!key) {
+    if (!el.hidden) {
+      el.hidden = true; el.classList.remove('in'); document.body.classList.remove('sheet-open'); sheetKey = null;
+      if (opener && opener.focus) opener.focus();
+    }
+    return;
+  }
+  const opening = el.hidden;
+  if (opening) { el.hidden = false; document.body.classList.add('sheet-open'); requestAnimationFrame(() => el.classList.add('in')); }
+  const t = STATE && STATE.titles ? STATE.titles[key] : null;
+  if (!t) {
+    put('sheet-bg', '');
+    put('sheet-head', `<div class="sh-top"><button class="back" type="button" data-close>‹ Back</button><h2 id="sheet-title" style="margin-top:20px">This title is no longer on this Mac</h2></div>`);
+    put('sheet-seasons', '');
+    put('sheet-body', '');
+  } else {
+    if (sheetKey !== key) { sheetKey = key; sheetSeason = defaultSeason(t); }
+    put('sheet-bg', backdrop(t.backdrop, t.poster));
+    put('sheet-head', sheetHead(t));
+    put('sheet-seasons', seasonsHTML(t, sheetSeason));
+    put('sheet-body', sheetBody(t, sheetSeason));
+  }
+  if (opening) { const b = $('sheet-panel').querySelector('.back'); if (b) b.focus(); }
+}
+
+function closeSheet() {
+  if (history.state && history.state.sheet) history.back();
+  else { location.hash = ''; renderSheet(); }
+}
+
+async function act(path, body, key) {
+  try {
+    const r = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Dashboard': '1' }, body: JSON.stringify(body || {}) });
+    const out = await r.json();
+    if (out.ok && !out.freed) delete notes[key];
+    else notes[key] = { text: out.ok ? `${out.message}, ${bytes(out.freed)} freed.` : out.message, at: Date.now() };
+  } catch (e) {
+    notes[key] = { text: 'The server didn\'t answer. Nothing changed.', at: Date.now() };
+  }
+  poll();
+}
+
 // ---------------------------------------------------------------- rendering and polling
 
 function render(state) {
@@ -328,6 +499,14 @@ function render(state) {
   $('glance-wrap').className = g ? 'cine glance live' : 'glance idle';
   put('glance-bg', g ? backdrop(g.backdrop, g.poster) : '');
   put('glance', glanceHTML(g, state.idle_text));
+  const u = state.up_next;
+  $('upnext-wrap').hidden = !u;
+  $('pair').className = u ? 'pair' : 'pair solo';
+  put('upnext-bg', u ? backdrop(u.backdrop, u.poster) : '');
+  put('upnext', upNextHTML(u));
+  put('shelf', shelfHTML(state.shelf));
+  for (const t of (state.shelf && state.shelf.items) || []) put(tileId(t.key), tileText(t));
+  renderSheet();
 }
 
 async function poll() {
@@ -365,6 +544,63 @@ function scrubTip(ev) {
 document.addEventListener('pointermove', scrubTip);
 document.addEventListener('pointerdown', scrubTip);
 document.addEventListener('visibilitychange', () => { if (!document.hidden) poll(); });
+document.addEventListener('click', (ev) => {
+  const t = ev.target.closest ? ev.target : null;
+  if (!t) return;
+  const open = t.closest('[data-open]');
+  if (open) { opener = open; history.pushState({ sheet: true }, '', `#title=${encodeURIComponent(open.dataset.open)}`); renderSheet(); return; }
+  if (t.closest('[data-close]')) { closeSheet(); return; }
+  const get = t.closest('[data-get]');
+  if (get) {
+    const left = Number(get.dataset.left), c = STATE && STATE.shelf;
+    const over = c && c.used + left > c.budget ? ` That takes the downloads past their ${bytes(c.budget)} limit, so the oldest ones not in use are deleted to make room.` : '';
+    if (confirm(`Download ${get.dataset.label} (${bytes(left)}) to this Mac for later? It downloads whenever the TV doesn't need the bandwidth.${over}`)) {
+      act('/ui/api/prefetch', { ih: get.dataset.get, idx: Number(get.dataset.idx) }, `${get.dataset.get}:${get.dataset.idx}`);
+    }
+    return;
+  }
+  const stop = t.closest('[data-cancel]');
+  if (stop) { act('/ui/api/prefetch/cancel', { ih: stop.dataset.cancel, idx: Number(stop.dataset.idx) }, `${stop.dataset.cancel}:${stop.dataset.idx}`); return; }
+  const one = t.closest('[data-delfile]');
+  if (one && confirm(`Delete ${one.dataset.label} (${one.dataset.size}) from this Mac? It downloads again if you play it.`)) {
+    act('/ui/api/cache/delete-file', { ih: one.dataset.delfile, idx: Number(one.dataset.idx) }, `${one.dataset.delfile}:${one.dataset.idx}`);
+    return;
+  }
+  const rel = t.closest('[data-del]');
+  if (rel) {
+    if (confirm(`Delete ${rel.dataset.label} (${rel.dataset.size}) from this Mac? It downloads again if you play it.`)) {
+      act('/ui/api/cache/delete', { ih: rel.dataset.del }, rel.dataset.key);
+    }
+    return;
+  }
+  const all = t.closest('[data-delall]');
+  if (all) {
+    const title = STATE && STATE.titles[all.dataset.delall];
+    if (title && confirm(`Delete everything of ${title.title} (${all.dataset.size}) from this Mac? It downloads again if you play it.`)) {
+      (async () => { for (const ih of title.ihs) await act('/ui/api/cache/delete', { ih }, title.key); })();
+    }
+    return;
+  }
+  const clr = t.closest('[data-clear]');
+  if (clr && confirm(`Delete ${clr.dataset.clear} downloaded torrent${clr.dataset.clear === '1' ? '' : 's'} (${clr.dataset.size})? Anything playing now is kept.`)) {
+    act('/ui/api/cache/clear', {}, 'shelf');
+  }
+});
+document.addEventListener('change', (ev) => {
+  if (ev.target && ev.target.id === 'season-pick') { sheetSeason = Number(ev.target.value); renderSheet(); }
+});
+window.addEventListener('popstate', renderSheet);
+window.addEventListener('hashchange', renderSheet);
+document.addEventListener('keydown', (ev) => {
+  if ($('sheet').hidden) return;
+  if (ev.key === 'Escape') { closeSheet(); return; }
+  if (ev.key !== 'Tab') return;
+  // Keep focus inside the open sheet.
+  const f = [...$('sheet-panel').querySelectorAll('button, select, a[href]')].filter((x) => !x.disabled);
+  if (!f.length) return;
+  if (ev.shiftKey && document.activeElement === f[0]) { ev.preventDefault(); f[f.length - 1].focus(); }
+  else if (!ev.shiftKey && document.activeElement === f[f.length - 1]) { ev.preventDefault(); f[0].focus(); }
+});
 poll();
 </script>
 </body>

@@ -21,6 +21,7 @@ export function page({ fetch = async () => { throw new Error('offline'); } } = {
     document: { getElementById: el, hidden: true, body: { classList: classList() }, addEventListener() {}, querySelector: () => null,
       querySelectorAll: () => [], contains: () => true, activeElement: null },
     location: { hash: '' }, history: { state: null, pushState() {}, back() {} },
+    window: { addEventListener() {} },
     localStorage: { getItem: () => null, setItem() {} },
     matchMedia: () => ({ matches: false }), requestAnimationFrame: (f) => f(), setTimeout: () => 0, clearTimeout() {},
     fetch, confirm: () => false, console, Intl, Date, Math, Number, String, JSON, Map, Set, Object, Array, Promise,
@@ -90,4 +91,99 @@ test('a failed poll keeps the page and says the server is unreachable', async ()
   await ctx.poll();
   assert.ok(els.glance.innerHTML.includes('Chernobyl'), 'the last render stays');
   assert.match(els.problem.innerHTML, /Can't reach the torrent server/);
+});
+
+const IH = 'b'.repeat(40);
+const ep = (n, name, done, extra = {}) => ({ season: 1, episode: n, label: `S01E0${n}`, name, file: `Chernobyl - S01E0${n}.mkv`, ih: IH, idx: n,
+  length: 6.4 * GB, done, busy: false, job: null, release: 'Accid', tag: null, next: false, ...extra });
+const JOB = { ih: IH, idx: 4, label: 'S01E04', state: 'downloading', done: 0.34, length: 6.4 * GB, message: null, mbps: 21.3, eta_s: 1500 };
+export const SERIES = {
+  key: 'tt7366338', title: 'Chernobyl', kind: 'series', year: '2019', poster: 'P', backdrop: 'BG', bytes: 3.8 * GB, last_used: 1,
+  in_use: false, ihs: [IH], meta_line: '2019 · Accid · 3.8 GB here', summary: 'S1 · 1 episode here', sub: null, seasons: [1], releases: [],
+  episodes: [ep(1, '1:23:45', 0), ep(2, 'Please Remain Calm', 0), ep(3, 'Open Wide, O Earth', 1), ep(4, 'The Happiness of All Mankind', 0.34, { job: JOB }),
+    ep(5, 'Vichnaya Pamyat', 0, { next: true })],
+};
+export const MOVIE = {
+  key: 'tt37287335', title: 'Obsession', kind: 'movie', year: '2026', poster: null, backdrop: null, bytes: 2.8 * GB, last_used: 1, in_use: false,
+  ihs: ['c'.repeat(40), 'd'.repeat(40)], meta_line: '2026 · Movie · 2 releases · 2.8 GB here', summary: 'Movie · 2 releases · 2.8 GB', sub: null,
+  seasons: [], episodes: [], releases: [
+    { ih: 'c'.repeat(40), idx: 0, name: 'Obsession...-BEN.THE.MEN', group: 'BEN.THE.MEN', chips: ['4K', 'WEB', 'MP4'],
+      verdict: { symbol: '✓✓', reason: null, summary: ['MP4', 'E-AC3', 'DV P8'] }, length: 21.7 * GB, done: 0.11, bytes: 2.4 * GB,
+      last_used: 1e9 - 172800, in_use: false, busy: false, job: null },
+    { ih: 'd'.repeat(40), idx: 4, name: 'Obsession (2026) (... r00t)', group: 'r00t', chips: ['MKV'],
+      verdict: { symbol: '✗', reason: "TrueHD: TV can't decode", summary: ['MKV', 'TrueHD'] }, length: 9 * GB, done: 0.02, bytes: 448 * 1024 * 1024,
+      last_used: 1e9 - 259200, in_use: false, busy: false, job: null }],
+};
+const UP = { key: 'tt7366338', ih: IH, idx: 4, title: 'Chernobyl', season: 1, episode: 4, label: 'S01E04', name: 'The Happiness of All Mankind',
+  length: 6.4 * GB, done: 0, job: null, state: 'not_here', poster: 'P', backdrop: 'BG' };
+
+test('Up next offers the episode, then shows its download, then that it is ready', () => {
+  const { ctx } = page();
+  let h = ctx.upNextHTML(UP);
+  assert.ok(h.includes('Chernobyl · Season 1') && h.includes('E4 · The Happiness of All Mankind') && h.includes('Download for later'));
+  assert.match(h, /data-get="b{40}" data-idx="4"/);
+  h = ctx.upNextHTML({ ...UP, state: 'downloading', job: JOB, done: 0.34 });
+  assert.ok(h.includes('Cancel') && h.includes('34%') && h.includes('about 25 min left'));
+  assert.ok(ctx.upNextHTML({ ...UP, state: 'ready', done: 1 }).includes('ready to watch'));
+  assert.equal(ctx.upNextHTML(null), '');
+});
+
+test('the shelf: one tile per title, the space, and clearing what is not in use', () => {
+  const { ctx } = page();
+  const sh = { used: 4.4 * GB, budget: 15 * GB, free: 22 * GB, idle_bytes: 3.8 * GB, idle_count: 1,
+    items: [{ key: 'tt7366338', title: 'Chernobyl', kind: 'series', poster: 'P', summary: 'S1 · 1 episode here', sub: 'E4 downloading 34%', last_used: 1, bytes: 1 }] };
+  const h = ctx.shelfHTML(sh);
+  assert.ok(h.includes('4.4 GB of 15 GB') && h.includes('data-open="tt7366338"') && h.includes('Delete everything not in use (3.8 GB)'));
+  assert.ok(ctx.tileText(sh.items[0]).includes('E4 downloading 34%'));
+  assert.ok(ctx.shelfHTML({ ...sh, items: [] }).includes('Nothing is stored'));
+  assert.ok(ctx.shelfHTML(null).includes('Reading the cache'));
+});
+
+test('a series sheet: every episode with its one action, the next one filled', () => {
+  const { ctx } = page();
+  const h = ctx.sheetBody(SERIES, 1);
+  assert.equal((h.match(/class="ep[ "]/g) || []).length, 5);
+  assert.match(h, /class="solid" type="button" data-get="b{40}" data-idx="5"/);
+  assert.match(h, /data-delfile="b{40}" data-idx="3"/);
+  assert.match(h, /data-cancel="b{40}" data-idx="4"/);
+  assert.ok(h.includes('Not on the Mac · 6.4 GB') && h.includes('Open Wide, O Earth'));
+  assert.ok(ctx.sheetHead(SERIES).includes('2019 · Accid · 3.8 GB here'));
+});
+
+test('the season picker appears only with more than one season', () => {
+  const { ctx } = page();
+  assert.ok(!ctx.seasonsHTML(SERIES, 1).includes('<select'));
+  const two = { ...SERIES, seasons: [1, 2] };
+  const h = ctx.seasonsHTML(two, 2);
+  assert.match(h, /<select id="season-pick"/);
+  assert.match(h, /<option value="2" selected>Season 2<\/option>/);
+});
+
+test('a movie sheet: one card per release with its verdict and how much is here', () => {
+  const { ctx } = page();
+  ctx.render(STATE);   // the cache budget (15 GB) comes from the state
+  const h = ctx.sheetBody(MOVIE, null);
+  assert.ok(h.includes('BEN.THE.MEN') && h.includes('Plays here — checked in the file: MP4, E-AC3, DV P8'));
+  assert.ok(h.includes('Won&#39;t play here — TrueHD: TV can&#39;t decode'));
+  assert.ok(h.includes('2.4 GB of 21.7 GB here (11%)'));
+  assert.ok(h.includes('Too big to download fully'), 'the 21.7 GB release does not fit a 15 GB cache');
+  assert.ok(h.includes('Download the rest'), 'the 9 GB one does');
+  assert.ok(h.includes('Delete all 2 releases'));
+  assert.match(h, /data-del="c{40}" data-key="c{40}:0" data-label="BEN.THE.MEN" data-size="2.4 GB"/, 'Delete removes the release from the Mac');
+});
+
+test('a sheet for a title that is gone says so', () => {
+  const { ctx, els } = page();
+  ctx.render({ ...STATE, titles: { tt7366338: SERIES } });
+  ctx.location.hash = '#title=tt0000000';
+  ctx.renderSheet();
+  assert.equal(els.sheet.hidden, false);
+  assert.ok(els['sheet-head'].innerHTML.includes('no longer on this Mac'));
+  ctx.location.hash = '#title=tt7366338';
+  ctx.renderSheet();
+  assert.ok(els['sheet-head'].innerHTML.includes('Chernobyl'));
+  assert.ok(els['sheet-body'].innerHTML.includes('Vichnaya Pamyat'));
+  ctx.location.hash = '';
+  ctx.renderSheet();
+  assert.equal(els.sheet.hidden, true);
 });
