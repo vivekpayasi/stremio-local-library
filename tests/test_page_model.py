@@ -2,6 +2,7 @@
 
 The dashboard page's model, from fixtures shaped like the real cache (the Accid Chernobyl pack, two Obsession releases)."""
 import sys
+import time
 import unittest
 from pathlib import Path
 
@@ -153,6 +154,101 @@ class UpNext(unittest.TestCase):
     def test_a_movie_or_the_last_episode_has_no_next(self):
         _, details = pm.library(rows()[1:], TITLES, [])
         self.assertIsNone(pm.up_next([dict(session(), ih=BEN, idx=0, next=None)], details, TITLES, []))
+
+
+def live(**over):
+    s = {'live': True, 'download_mbps': 31.0, 'bitrate_mbps': 15.0, 'ahead_s': 260, 'complete': False, 'waiting_s': 0,
+         'waiting_mid': False, 'peers': {'connected': 38, 'sending': 12, 'seeds': 30}, 'events': [],
+         'health': {'level': 'good', 'text': 'Playing smoothly, 4:20 buffered ahead'}}
+    s.update(over)
+    return s
+
+
+SERVER = {'cpu': 3.2, 'rss_mb': 80, 'uptime_s': 58000, 'download_cap_mbps': 48, 'learning': True}
+CACHE = {'used': int(4.4 * GB), 'budget': 15 * GB, 'free': 22 * GB}
+LIB = {'movies': 0, 'shows': 0, 'other': 0, 'files': 0, 'advisor': {'profile': 'TCL Smart TV Pro', 'facts': 11, 'upstreams': ['Torrentio']},
+       'account': {'text': 'Your Stremio account is up to date', 'ok': True, 'at': None}}
+WIFI = {'band': '5GHz', 'channel': 149, 'width': '80MHz', 'rssi': -42, 'noise': -91, 'rate': 526}
+TV_OK = {'state': 'ok', 'ip': '192.168.0.100', 'model': 'Smart TV Pro', 'android': '12',
+         'wifi': {'rssi': -58, 'link': 433, 'band': '5GHz', 'standard': 'Wi-Fi 5'}, 'memory': {'total_mb': 1900, 'available_mb': 610},
+         'stremio': {'cpu': 21.0, 'memory': '300M'},
+         'player': {'name': 'ExoPlayer', 'video_decoder': 'OMX.amlogic.dolby-vision.dvhe.decoder.awesome2', 'error': None,
+                    'error_at': None, 'dts_on_tv': False, 'low_memory_kills': 0}}
+
+
+class Chain(unittest.TestCase):
+    def test_the_swarm_step(self):
+        s = pm.swarm_step(live(), [])
+        self.assertEqual((s['level'], s['line'], s['reason']), ('good', '31 Mbps in, the file needs 15 · 38 peers, 12 sending', None))
+        stalled = pm.swarm_step(live(health={'level': 'bad', 'text': 'Stalled, waiting for pieces (8 s) — the torrent can\'t keep up'}), [])
+        self.assertEqual(stalled['level'], 'bad')
+        self.assertTrue(stalled['reason'].startswith('Stalled'))
+        low = pm.swarm_step(live(health={'level': 'warn', 'text': 'Buffer is low: the swarm sends 9 Mbps, the file needs 15'}), [])
+        self.assertEqual((low['level'], low['reason']), ('warn', 'Buffer is low: the swarm sends 9 Mbps, the file needs 15'))
+        jump = pm.swarm_step(live(health={'level': 'warn', 'text': 'Buffering after a jump (4 s)'}), [])
+        self.assertEqual((jump['level'], jump['reason']), ('good', None), 'a seek is not the swarm\'s fault')
+        later = pm.swarm_step(None, [job(PACK, 3, 'S01E04')])
+        self.assertEqual((later['level'], later['line']), ('good', 'Downloading S01E04 for later · 21 Mbps'))
+        self.assertEqual(pm.swarm_step(None, [])['level'], 'idle')
+
+    def test_this_mac_and_its_services(self):
+        m = pm.mac_step(SERVER, CACHE, LIB, 3 * GB)
+        self.assertEqual(m['level'], 'good')
+        self.assertEqual(m['line'], 'up 16 h 6 min · cache 4.4 GB of 15.0 GB · 22.0 GB free')
+        self.assertEqual([(v['name'], v['level']) for v in m['services']],
+                         [('Torrent server', 'good'), ('Library', 'good'), ('Stream Advisor', 'good'), ('Stremio account', 'good')])
+        down = pm.mac_step(SERVER, CACHE, None, 3 * GB)
+        self.assertEqual((down['level'], [v['level'] for v in down['services']]), ('warn', ['good', 'bad', 'bad', 'idle']))
+        self.assertIn('Library', down['reason'])
+        out = dict(LIB, account={'text': "Stremio desktop is signed out, so the account can't be updated", 'ok': False, 'at': None})
+        signed_out = pm.mac_step(SERVER, CACHE, out, 3 * GB)
+        self.assertEqual((signed_out['level'], signed_out['reason']), ('warn', "Stremio desktop is signed out, so the account can't be updated"))
+        full = pm.mac_step(SERVER, dict(CACHE, free=2 * GB), LIB, 3 * GB)
+        self.assertEqual((full['level'], full['reason']), ('warn', 'Only 2.0 GB free on the disk'))
+
+    def test_wifi_is_judged_while_something_plays(self):
+        w = pm.wifi_step(WIFI, {'ms': 4.0, 'loss': 0, 'ip': '192.168.0.100'}, 4.0, TV_OK, True)
+        self.assertEqual((w['level'], w['line']), ('good', 'Mac on 5GHz, −42 dBm, excellent · ping to the TV 4 ms · TV −58 dBm, good'))
+        slow = pm.wifi_step(WIFI, {'ms': 120.0, 'loss': 0, 'ip': '192.168.0.100'}, 4.0, TV_OK, True)
+        self.assertEqual((slow['level'], slow['reason']), ('warn', 'The TV\'s Wi-Fi is slow to answer'))
+        self.assertEqual(slow['advice'], 'Ping 120 ms (usually 4) — playback may stutter. Restarting the TV usually clears it.')
+        idle = pm.wifi_step(WIFI, {'ms': 120.0, 'loss': 0, 'ip': '192.168.0.100'}, 4.0, TV_OK, False)
+        self.assertEqual(idle['level'], 'good', 'a slow answer while nothing plays is not worth a banner')
+        silent = pm.wifi_step(None, {'ms': None, 'loss': 100, 'ip': '192.168.0.100'}, None, None, True)
+        self.assertEqual((silent['level'], silent['line']), ('good', 'Mac not on Wi-Fi'), 'no answer to ping proves nothing')
+
+    def test_the_tv(self):
+        now = time.mktime(time.strptime('2026-10-13 21:00:00', '%Y-%m-%d %H:%M:%S'))
+        t = pm.tv_step(TV_OK, live(), now)
+        self.assertEqual((t['level'], t['line']), ('good', 'ExoPlayer · Dolby Vision decoder · 610 MB free'))
+        asleep = pm.tv_step({'state': 'unreachable', 'ip': '192.168.0.100'}, None, now)
+        self.assertEqual((asleep['level'], asleep['line']), ('idle', 'Asleep — not answering'))
+        err = dict(TV_OK, player=dict(TV_OK['player'], error='Decoder init failed: OMX.amlogic.hevc', error_at='20:55:10'))
+        self.assertEqual(pm.tv_step(err, live(), now)['level'], 'bad')
+        old = dict(TV_OK, player=dict(TV_OK['player'], error='Decoder init failed', error_at='19:10:00'))
+        self.assertEqual(pm.tv_step(old, live(), now)['level'], 'good', 'an error from two hours ago is history')
+        mpv = dict(TV_OK, player=dict(TV_OK['player'], name='mpv'))
+        self.assertEqual(pm.tv_step(mpv, live(), now)['level'], 'warn')
+        self.assertEqual(pm.tv_step(mpv, None, now)['level'], 'good', 'which player was last used matters only while playing')
+        self.assertEqual(pm.tv_step(None, None, now)['level'], 'idle')
+
+    def test_the_worst_problem_makes_the_banner(self):
+        steps = [pm.swarm_step(live(health={'level': 'bad', 'text': 'Stalled, waiting for pieces (8 s)'}), []),
+                 pm.mac_step(SERVER, CACHE, LIB, 3 * GB),
+                 pm.wifi_step(WIFI, {'ms': 120.0, 'loss': 0, 'ip': 'x'}, 4.0, TV_OK, True),
+                 pm.tv_step(TV_OK, live(), time.time())]
+        p = pm.problem(steps)
+        self.assertEqual((p['level'], p['step']), ('bad', 'swarm'))
+        steps[0] = pm.swarm_step(live(), [])
+        self.assertEqual(pm.problem(steps)['step'], 'wifi')
+        steps[2] = pm.wifi_step(WIFI, {'ms': 4.0, 'loss': 0, 'ip': 'x'}, 4.0, TV_OK, True)
+        self.assertIsNone(pm.problem(steps))
+
+    def test_usual_ping_is_the_median_of_the_last_hour(self):
+        now = 10000.0
+        history = [(now - 4000, 300.0)] + [(now - i * 5, ms) for i, ms in enumerate([4, 5, 3, 4, 90, 4])]
+        self.assertEqual(pm.usual_ping(history, now), 4.0)
+        self.assertIsNone(pm.usual_ping(history[:3], now), 'too few readings to say')
 
 
 if __name__ == '__main__':
