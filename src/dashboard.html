@@ -4,182 +4,222 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="dark light">
-<meta name="theme-color" content="#0F1B2D" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#0b1320" media="(prefers-color-scheme: dark)">
 <meta name="theme-color" content="#EEF2F8" media="(prefers-color-scheme: light)">
 <title>Stream dashboard</title>
 <style>
 :root {
-  --bg: #0F1B2D; --raise: #16243A; --rule: #24375A; --track: #22344F;
+  --bg: #0b1320; --raise: #111c2e; --raise-2: #16243A; --rule: #1d2b42; --track: #1d2b42;
   --ink: #EAF0F8; --ink-2: #B4C2D6; --muted: #8193AD;
-  --have: #6A8FE8; --ahead: #129680;
-  --good: #4CC38A; --warn: #F2B53A; --bad: #FF6B6B;
+  --have: rgba(234, 240, 248, .28); --ahead: #129680; --accent: #7FA6FF; --space: #6A8FE8;
+  --good: #4CC38A; --warn: #F2B53A; --bad: #FF6B6B; --idle: #61728c;
+  --veil: 11, 19, 32;
   --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  --figures: ui-rounded, "SF Pro Rounded", system-ui, -apple-system, Roboto, sans-serif;
   --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
 }
 @media (prefers-color-scheme: light) {
   :root {
-    --bg: #EEF2F8; --raise: #FFFFFF; --rule: #D3DCE9; --track: #E3E9F2;
+    --bg: #EEF2F8; --raise: #FFFFFF; --raise-2: #F4F7FB; --rule: #D3DCE9; --track: #E3E9F2;
     --ink: #0F1B2D; --ink-2: #33445E; --muted: #5A6B85;
-    --have: #3D6CC7; --ahead: #0E9682;
-    --good: #1E8E5A; --warn: #A86A00; --bad: #C93C3C;
+    --have: rgba(15, 27, 45, .22); --ahead: #0E9682; --accent: #3D6CC7; --space: #3D6CC7;
+    --good: #1E8E5A; --warn: #A86A00; --bad: #A82424; --idle: #8A97AB;
+    --veil: 238, 242, 248;
   }
 }
 * { box-sizing: border-box; }
 html { -webkit-text-size-adjust: 100%; }
-body {
-  margin: 0; background: var(--bg); color: var(--ink); font: 16px/1.5 var(--sans);
-  padding: max(12px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right))
-           max(24px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.45 var(--sans);
+  padding: max(10px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) max(24px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left)); }
+body.sheet-open { overflow: hidden; }
+h1, h2, p, ol, ul, dl, dd { margin: 0; }
+ul, ol { list-style: none; padding: 0; }
+button, select { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 6px; }
+.muted { color: var(--muted); } .small { font-size: 13px; }
+.lv-good { color: var(--good); } .lv-warn { color: var(--warn); } .lv-bad { color: var(--bad); } .lv-idle { color: var(--idle); }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.eyebrow { font-size: 12px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; color: var(--muted); }
+
+.page { max-width: 1320px; margin: 0 auto; }
+.layout { display: grid; gap: 18px; }
+.main-col { display: grid; gap: 18px; min-width: 0; }
+.pair { display: grid; gap: 18px; }
+.side { display: grid; gap: 14px; min-width: 0; }
+@media (min-width: 760px) { .pair { grid-template-columns: 1fr 1.25fr; align-items: start; } .pair.solo { grid-template-columns: 1fr; } }
+@media (min-width: 1100px) { .layout { grid-template-columns: 1.65fr 1fr; align-items: start; } .side { position: sticky; top: 12px; } }
+
+/* the banner: the worst problem, or the server being unreachable */
+.banner { display: flex; gap: 10px; align-items: flex-start; border-radius: 14px; padding: 10px 14px; margin-bottom: 14px; }
+.banner p { color: var(--ink-2); font-size: 13.5px; margin-top: 2px; }
+.banner-warn { background: color-mix(in srgb, var(--warn) 15%, transparent); }
+.banner-bad { background: color-mix(in srgb, var(--bad) 15%, transparent); }
+
+/* cinematic panels: a soft backdrop under a gradient into the surface */
+.cine { position: relative; overflow: hidden; border-radius: 20px; background: var(--raise); isolation: isolate; }
+.bd-wrap { position: absolute; inset: 0; z-index: -1; overflow: hidden; }
+.bd-wrap .bd { position: absolute; inset: -40px; width: calc(100% + 80px); height: calc(100% + 80px); object-fit: cover;
+  filter: blur(18px) saturate(1.15); opacity: .55; }
+.bd-wrap .bd-poster { filter: blur(30px) saturate(1.2); }
+.bd-wrap::after { content: ""; position: absolute; inset: 0;
+  background: linear-gradient(180deg, rgba(var(--veil), .2) 0%, rgba(var(--veil), .8) 55%, rgb(var(--veil)) 100%); }
+
+/* the glance */
+.glance.idle { background: none; }
+.glance.live { min-height: 300px; }
+.g-body { position: relative; padding: 18px 16px 16px; display: flex; flex-direction: column; min-height: inherit; }
+.g-status { font-size: 13px; color: var(--ink-2); }
+.g-title { font-size: 34px; line-height: 1.05; font-weight: 800; letter-spacing: -.02em; margin-top: auto; padding-top: 64px; overflow-wrap: anywhere; }
+.g-sub { color: var(--ink-2); margin-top: 4px; }
+.g-ahead { font-size: 17px; margin-top: 14px; color: var(--ink-2); } .g-ahead b { color: var(--ink); }
+.scrub { position: relative; margin-top: 18px; touch-action: none; cursor: crosshair; }
+.scrub svg { display: block; width: 100%; height: 12px; }
+.scrub .head { position: absolute; top: -4px; width: 4px; height: 16px; border-radius: 2px; background: var(--ink); transform: translateX(-2px); }
+.scrub-axis { display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); margin-top: 4px; font-variant-numeric: tabular-nums; }
+.scrub-axis span:first-child { color: var(--ink); }
+.tip { position: absolute; bottom: 34px; transform: translateX(-50%); background: var(--bg); color: var(--ink); border: 1px solid var(--rule);
+  border-radius: 6px; padding: 2px 8px; font-size: 12px; white-space: nowrap; pointer-events: none; }
+.g-stats { font-size: 13px; color: var(--muted); margin-top: 12px; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.chips li { font-size: 12px; padding: 2px 9px; border-radius: 999px; background: color-mix(in srgb, var(--ink) 9%, transparent); color: var(--ink-2); }
+.chips li.proof { background: none; color: var(--muted); padding-left: 2px; }
+.idle-line { font-size: 15px; color: var(--ink-2); padding: 4px 2px 2px; }
+@media (min-width: 760px) { .glance.live { min-height: 340px; } .g-body { padding: 22px 24px 20px; } .g-title { font-size: 44px; } }
+
+/* buttons, bars, notes */
+.bar { display: block; height: 5px; border-radius: 3px; background: var(--track); overflow: hidden; }
+.bar b { display: block; height: 100%; border-radius: 3px; background: var(--accent); }
+.bar.space b { background: var(--space); }
+button.solid, button.ghost { min-height: 40px; padding: 6px 16px; border-radius: 999px; cursor: pointer; font-size: 14px; font-weight: 600; white-space: nowrap; }
+button.solid { background: var(--ink); color: var(--bg); border: 0; }
+button.ghost { background: none; color: var(--ink-2); border: 1px solid var(--rule); }
+button.ghost:hover { border-color: var(--ink-2); }
+button.danger { color: var(--bad); } button.danger:hover { border-color: var(--bad); }
+button.wide { width: 100%; margin-top: 12px; }
+.note { font-size: 13px; color: var(--ink-2); margin-top: 8px; }
+
+/* up next */
+.un-body { position: relative; padding: 16px; }
+.un-show { color: var(--ink-2); font-size: 13px; margin-top: 10px; }
+.un-ep { font-size: 21px; font-weight: 800; line-height: 1.15; margin: 2px 0 10px; overflow-wrap: anywhere; }
+.un-body button { margin-top: 10px; }
+.un-body .bar { margin-top: 4px; }
+
+/* the shelf */
+.sh-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.sh-head .muted { margin-left: auto; }
+.shelf-sec .bar.space { margin: 8px 0 14px; }
+.shelf { display: flex; gap: 12px; overflow-x: auto; scroll-snap-type: x proximity; padding-bottom: 6px; }
+.tile { display: flex; flex-direction: column; align-items: flex-start; width: 124px; flex: none; background: none; border: 0; padding: 0;
+  text-align: left; cursor: pointer; scroll-snap-align: start; border-radius: 10px; }
+.poster { width: 124px; aspect-ratio: 2 / 3; border-radius: 10px; object-fit: cover; background: var(--raise-2); display: block; }
+.poster.ph { display: grid; place-items: center; font: 800 28px var(--sans); color: var(--muted); }
+.t-name { display: block; font-weight: 700; font-size: 14px; margin-top: 7px; overflow-wrap: anywhere; }
+.t-sum, .t-sub { display: block; font-size: 12px; color: var(--muted); line-height: 1.35; }
+.t-sub { color: var(--accent); }
+
+/* title sheets */
+.sheet { position: fixed; inset: 0; z-index: 10; }
+.sheet[hidden] { display: none; }
+.sheet-scrim { position: absolute; inset: 0; background: rgba(0, 0, 0, .5); }
+.sheet-panel { position: absolute; left: 0; right: 0; bottom: 0; top: 6vh; background: var(--bg); border-radius: 20px 20px 0 0; overflow-y: auto; isolation: isolate; }
+@media (min-width: 760px) { .sheet-panel { left: auto; top: 0; width: 480px; border-radius: 0; } }
+@media (prefers-reduced-motion: no-preference) {
+  .sheet.in .sheet-panel { animation: rise .22s ease-out; }
+  @media (min-width: 760px) { .sheet.in .sheet-panel { animation-name: slide; } }
 }
-main, .status { max-width: 1180px; margin: 0 auto; }
-h1, h2, p, dl, dd, ol, ul, figure { margin: 0; }
-:focus-visible { outline: 2px solid var(--have); outline-offset: 3px; border-radius: 4px; }
+@keyframes rise { from { transform: translateY(40px); opacity: .6; } }
+@keyframes slide { from { transform: translateX(40px); opacity: .6; } }
+.sheet-panel .bd-wrap { height: 260px; bottom: auto; }
+.sh-top { position: relative; padding: 10px 16px 6px; }
+.back { background: none; border: 0; color: var(--ink-2); font-size: 15px; min-height: 40px; padding: 0 6px 0 0; cursor: pointer; }
+.sh-id { display: flex; gap: 14px; align-items: flex-end; margin-top: 26px; }
+.sh-id .poster { width: 72px; }
+.sh-id h2 { font-size: 28px; line-height: 1.05; font-weight: 800; overflow-wrap: anywhere; }
+.sh-meta { color: var(--ink-2); font-size: 13px; margin-top: 4px; }
+.sh-seasons { padding: 12px 16px 0; display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--muted); }
+select { font-weight: 600; color: var(--ink); background: var(--raise); border: 1px solid var(--rule); border-radius: 10px; padding: 6px 10px; min-height: 40px; }
+.eps { padding: 6px 16px 8px; }
+.ep { display: grid; grid-template-columns: 30px 1fr auto; gap: 2px 10px; align-items: center; padding: 12px 0; border-top: 1px solid var(--rule); }
+.ep-n { font-weight: 700; color: var(--muted); font-variant-numeric: tabular-nums; grid-row: 1 / span 2; align-self: start; padding-top: 1px; }
+.ep.here .ep-n { color: var(--ink); }
+.ep-t { font-weight: 650; font-size: 14px; overflow-wrap: anywhere; }
+.ep-s { grid-column: 2; font-size: 12.5px; color: var(--muted); }
+.ep-s .bar { margin: 5px 0 4px; max-width: 200px; }
+.ep-a { grid-column: 3; grid-row: 1 / span 2; display: flex; gap: 6px; }
+.ep-a button { min-height: 36px; padding: 4px 12px; font-size: 13px; }
+.ep .note { grid-column: 2 / -1; }
+.tag { font-size: 11px; font-weight: 500; color: var(--muted); border: 1px solid var(--rule); border-radius: 999px; padding: 0 6px; }
+.rels { padding: 8px 16px 8px; display: grid; gap: 10px; }
+.rel { background: var(--raise); border-radius: 14px; padding: 12px 14px; }
+.rel-h { display: flex; align-items: baseline; gap: 10px; }
+.rel-h b { font-size: 15px; overflow-wrap: anywhere; }
+.rel-h span { margin-left: auto; font-size: 12px; color: var(--muted); white-space: nowrap; }
+.rel .chips li { font-size: 11px; }
+.verdict { font-size: 13px; margin-top: 8px; color: var(--ink-2); }
+.sym { font-weight: 700; } .sym-good { color: var(--good); } .sym-warn { color: var(--warn); } .sym-bad { color: var(--bad); }
+.rel .bar { margin: 10px 0 4px; }
+.rel-f { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; } .rel-f .muted { font-size: 12.5px; flex: 1; }
+.rel-f button { min-height: 36px; padding: 4px 12px; font-size: 13px; }
+.sheet-foot { padding: 4px 16px 28px; }
 
-/* the one sentence on how things are going */
-.status { display: flex; align-items: baseline; gap: 10px; padding: 6px 0 14px; }
-.status p { font-size: 17px; font-weight: 600; line-height: 1.35; }
-.mark { flex: none; width: 1.1em; text-align: center; font-size: 15px; }
-.lv-good { color: var(--good); } .lv-warn { color: var(--warn); } .lv-bad { color: var(--bad); } .lv-idle { color: var(--muted); }
-.fresh { margin-left: auto; flex: none; font-size: 13px; color: var(--muted); }
+/* the chain from the swarm to the TV */
+.side-card { background: var(--raise); border-radius: 18px; padding: 16px; }
+.chain { margin-top: 12px; }
+.step { position: relative; padding: 0 0 16px 28px; }
+.step::before { content: ""; position: absolute; left: 7px; top: 20px; bottom: -2px; width: 2px; background: var(--rule); }
+.step:last-child { padding-bottom: 0; } .step:last-child::before { display: none; }
+.dot { position: absolute; left: 0; top: 3px; width: 16px; height: 16px; border-radius: 50%; display: grid; place-items: center; font-size: 10px; font-weight: 800; color: var(--bg); }
+.dot-good { background: var(--good); } .dot-warn { background: var(--warn); } .dot-bad { background: var(--bad); } .dot-idle { background: var(--idle); }
+.step-head { background: none; border: 0; padding: 0; cursor: pointer; font-weight: 650; font-size: 14.5px; min-height: 24px; text-align: left; }
+.step-head::after { content: " ▸"; color: var(--muted); font-weight: 400; } .step-head[aria-expanded="true"]::after { content: " ▾"; }
+.step-warn .step-name { color: var(--warn); } .step-bad .step-name { color: var(--bad); }
+.step-reason { font-size: 13px; margin-top: 2px; }
+.step-line { font-size: 12.5px; color: var(--muted); margin-top: 2px; }
+.svc { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 12px; margin-top: 8px; font-size: 12.5px; color: var(--ink-2); }
+.kv { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; margin-top: 10px; font-size: 12.5px; }
+.kv dt { color: var(--muted); } .kv dd { text-align: right; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
 
-/* now playing — the raised panel */
-.now { background: var(--raise); border-radius: 18px; padding: 18px 16px 16px; }
-.np { display: grid; grid-template-columns: 64px 1fr; gap: 14px; align-items: start; }
-.poster { width: 64px; aspect-ratio: 2 / 3; border-radius: 8px; object-fit: cover; background: var(--track); display: block; }
-.poster.ph { display: grid; place-items: center; font: 700 26px var(--figures); color: var(--muted); }
-.np h1 { font-size: 26px; line-height: 1.15; font-weight: 700; letter-spacing: -0.01em; overflow-wrap: anywhere; }
-.np .sub { color: var(--ink-2); font-size: 15px; margin-top: 2px; }
-.np .file { color: var(--muted); font-size: 13px; margin-top: 6px; overflow-wrap: anywhere; }
-.np .file span + span::before { content: ""; display: inline-block; width: 12px; }
-
-.strip { margin: 20px 0 6px; position: relative; padding-top: 22px; }
-.strip svg { display: block; width: 100%; height: 30px; }
-.head-label { position: absolute; top: 0; transform: translateX(-50%); font: 600 13px var(--figures);
-  font-variant-numeric: tabular-nums; color: var(--ink); white-space: nowrap; }
-.legend { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 13px; color: var(--ink-2); margin-top: 8px; }
-.legend i { display: inline-block; width: 12px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
-.legend i.line { width: 2px; height: 12px; border-radius: 0; background: var(--ink); margin: 0 8px 0 4px; vertical-align: -2px; }
-.axis { display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); margin-top: 4px; font-variant-numeric: tabular-nums; }
-
-.figures { display: grid; grid-template-columns: 1fr 1fr; gap: 14px 18px; margin-top: 18px; }
-.fig .label { font-size: 13px; color: var(--ink-2); }
-.fig .value { font: 600 26px/1.15 var(--figures); font-variant-numeric: tabular-nums; }
-.fig .note { font-size: 13px; color: var(--muted); }
-.fig.hero { grid-column: 1 / -1; }
-.fig.hero .value { font-size: 52px; letter-spacing: -0.02em; }
-
-.spark { margin-top: 16px; position: relative; }
-.spark .label { font-size: 13px; color: var(--ink-2); margin-bottom: 4px; }
-.spark svg { display: block; width: 100%; height: 64px; touch-action: none; }
-.tip { position: absolute; pointer-events: none; background: var(--bg); color: var(--ink); border: 1px solid var(--rule);
-  border-radius: 6px; padding: 2px 8px; font: 600 13px var(--figures); font-variant-numeric: tabular-nums;
-  white-space: nowrap; transform: translate(-50%, -110%); }
-
-.chips { list-style: none; padding: 0; display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; }
-.chips li { border: 1px solid var(--rule); border-radius: 999px; padding: 3px 11px; font-size: 13px; color: var(--ink-2); }
-.chips li.proof { border-color: transparent; background: var(--track); color: var(--ink); }
-.fix { margin-top: 12px; font-size: 14px; color: var(--ink-2); }
-
-.events { list-style: none; padding: 0; margin-top: 16px; border-top: 1px solid var(--rule); }
-.events li { display: grid; grid-template-columns: 1.4em 1fr auto; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--rule); font-size: 14px; }
-.events .why { display: block; color: var(--muted); font-size: 13px; }
-.events time { color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
-
-.empty h1 { font-size: 24px; font-weight: 700; }
-.empty p { color: var(--ink-2); margin-top: 6px; max-width: 60ch; }
-.empty .sub { margin-top: 16px; font-size: 13px; color: var(--muted); }
-.earlier { list-style: none; padding: 0; margin-top: 4px; }
-.earlier li { padding: 8px 0; border-top: 1px solid var(--rule); font-size: 14px; display: flex; gap: 12px; justify-content: space-between; }
-.earlier li > span:last-child { color: var(--muted); white-space: nowrap; }
-
-/* the episode after this one, to download for later */
-.next { display: grid; grid-template-columns: 1fr auto; gap: 4px 12px; align-items: center; margin-top: 16px; padding-top: 12px;
-  border-top: 1px solid var(--rule); font-size: 14px; }
-.next p { font-variant-numeric: tabular-nums; }
-.next .q, .c-files .q { display: block; color: var(--muted); font-size: 13px; }
-.next .bar, .c-files .bar { display: block; height: 4px; border-radius: 2px; background: var(--track); overflow: hidden; margin-top: 3px; max-width: 280px; }
-.next .bar b, .c-files .bar b { display: block; height: 100%; background: var(--have); border-radius: 2px; }
-.next .bar { grid-column: 1; }
-.next button { grid-column: 2; grid-row: 1 / span 2; }
-.next .msg { grid-column: 1 / -1; color: var(--ink-2); font-size: 13px; }
-.earlier .next, .cache-list .next { margin-top: 6px; padding-top: 0; border-top: 0; font-size: 13px; color: var(--ink-2); }
-button.get { font: inherit; font-size: 14px; min-height: 40px; padding: 6px 14px; border-radius: 8px; cursor: pointer;
-  background: transparent; color: var(--have); border: 1px solid var(--rule); white-space: nowrap; }
-button.get:hover { border-color: var(--have); }
-button.get.small { min-height: 36px; padding: 2px 12px; font-size: 13px; }
-
-/* the quieter sections */
-.grid { display: grid; grid-template-columns: 1fr; gap: 0 32px; margin-top: 8px; }
-.sec { border-top: 1px solid var(--rule); padding: 16px 0 18px; min-width: 0; }
-.sec h2 { font-size: 16px; font-weight: 650; margin-bottom: 8px; }
-.sec .lead { font-size: 14px; color: var(--ink-2); margin-bottom: 8px; }
-dl.kv { display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; font-size: 14px; }
-dl.kv dt { color: var(--ink-2); }
-dl.kv dd { text-align: right; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
-dl.kv dd .q { color: var(--muted); }
-.meter { height: 8px; border-radius: 4px; background: var(--track); overflow: hidden; margin: 2px 0 2px auto; max-width: 180px; }
-.meter b { display: block; height: 100%; background: var(--have); border-radius: 4px; }
-.alert { margin-top: 10px; font-size: 13px; color: var(--ink-2); border-left: 3px solid var(--bad); padding: 4px 0 4px 10px; overflow-wrap: anywhere; }
-.alert.warn { border-color: var(--warn); }
-.copy { font: inherit; font-size: 13px; color: var(--ink); background: var(--track); border: 0; border-radius: 6px;
-  padding: 6px 10px; min-height: 36px; cursor: pointer; text-align: left; overflow-wrap: anywhere; width: 100%; }
-
-.cache-list { list-style: none; padding: 0; margin: 4px 0 12px; }
-.cache-list li { display: grid; grid-template-columns: 1fr auto; gap: 4px 12px; align-items: center; padding: 10px 0;
-  border-top: 1px solid var(--rule); font-size: 14px; }
-.cache-list .c-title { font-weight: 600; overflow-wrap: anywhere; }
-.cache-list .c-sub { display: block; color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
-.cache-list .c-meta { display: block; color: var(--ink-2); font-size: 13px; font-variant-numeric: tabular-nums; margin-top: 2px; }
-.cache-list .c-title { display: block; }
-.cache-list .inuse { font-size: 13px; color: var(--muted); padding: 0 6px; }
-.c-files { list-style: none; padding: 0; margin: 6px 0 2px; }
-.c-files li { display: grid; grid-template-columns: 1fr auto; gap: 2px 10px; align-items: center; border: 0; padding: 4px 0;
-  font-size: 13px; color: var(--ink-2); font-variant-numeric: tabular-nums; }
-.c-files .bar { grid-column: 1; }
-.c-files .f-act { grid-column: 2; grid-row: 1 / span 2; }
-button.del.small { min-height: 36px; padding: 2px 12px; font-size: 13px; }
-button.del, button.clear { font: inherit; font-size: 14px; min-height: 40px; padding: 6px 14px; border-radius: 8px; cursor: pointer;
-  background: transparent; color: var(--bad); border: 1px solid var(--rule); }
-button.clear { width: 100%; }
-button.del:hover, button.clear:hover { border-color: var(--bad); }
-.cache-msg { font-size: 13px; color: var(--ink-2); min-height: 1.2em; margin-top: 8px; }
-details.log { border-top: 1px solid var(--rule); padding: 14px 0; }
-details.log summary { font-weight: 650; cursor: pointer; min-height: 32px; }
-.log ol { list-style: none; padding: 0; margin-top: 8px; font: 12px/1.55 var(--mono); color: var(--ink-2); }
+/* recent and the log */
+details.recent, details.log { border-top: 1px solid var(--rule); padding-top: 12px; }
+details summary { cursor: pointer; min-height: 32px; font-weight: 650; }
+.spark { position: relative; margin-top: 6px; } .spark svg { display: block; width: 100%; height: 56px; touch-action: none; }
+.spark .label { font-size: 12.5px; color: var(--muted); }
+.spark .tip { bottom: auto; top: 0; }
+.cross { position: absolute; top: 22px; bottom: 0; width: 1px; background: var(--ink-2); pointer-events: none; }
+.events li { display: grid; grid-template-columns: 1.4em 1fr auto; gap: 6px; padding: 7px 0; border-top: 1px solid var(--rule); font-size: 13px; }
+.events .why { display: block; color: var(--muted); font-size: 12px; } .events time { color: var(--muted); font-size: 12px; }
+details.log { margin-top: 22px; }
+.log ol { margin-top: 8px; font: 12px/1.55 var(--mono); color: var(--ink-2); }
 .log li { display: grid; grid-template-columns: 5.5em 1fr; gap: 8px; overflow-wrap: anywhere; }
 .log time { color: var(--muted); }
-
-@media (min-width: 760px) {
-  .now { padding: 24px; }
-  .np { grid-template-columns: 96px 1fr; gap: 20px; }
-  .poster { width: 96px; }
-  .np h1 { font-size: 32px; }
-  .figures { grid-template-columns: 1.4fr 1fr 1fr; align-items: end; }
-  .fig.hero { grid-column: auto; }
-  .grid { grid-template-columns: 1fr 1fr; }
-}
-@media (min-width: 1440px) { .grid { grid-template-columns: repeat(4, 1fr); } }
-@media (prefers-reduced-motion: no-preference) { .strip rect.ahead, .meter b { transition: width .6s ease, x .6s ease; } }
+@media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
 </style>
 </head>
 <body>
-<header class="status" aria-live="polite">
-  <span class="mark lv-idle" id="mark" aria-hidden="true">○</span>
-  <p id="health">Connecting to the torrent server…</p>
-  <span class="fresh" id="fresh"></span>
-</header>
-<main>
-  <section class="now" id="now" aria-label="Now playing"></section>
-  <div class="grid">
-    <section class="sec" id="tv" aria-labelledby="tv-h"></section>
-    <section class="sec" id="network" aria-labelledby="net-h"></section>
-    <section class="sec" id="mac" aria-labelledby="mac-h"></section>
-    <section class="sec" id="library" aria-labelledby="lib-h"></section>
-  </div>
-  <section class="sec" id="cache" aria-labelledby="cache-h"></section>
+<div class="page">
+  <div id="problem" aria-live="polite"></div>
+  <main class="layout">
+    <div class="main-col">
+      <section class="glance idle" id="glance-wrap" aria-label="Now playing"><div class="bd-wrap" id="glance-bg"></div><div id="glance"></div></section>
+      <div class="pair solo" id="pair">
+        <section class="cine upnext" id="upnext-wrap" aria-label="Up next" hidden><div class="bd-wrap" id="upnext-bg"></div><div id="upnext"></div></section>
+        <section class="shelf-sec" id="shelf" aria-label="On this Mac"></section>
+      </div>
+    </div>
+    <aside class="side">
+      <section class="side-card" id="chain" aria-label="From the swarm to your TV"></section>
+      <div id="recent"></div>
+    </aside>
+  </main>
   <details class="log" id="log"><summary>Server log</summary><ol id="loglines"></ol></details>
-</main>
+</div>
+<div class="sheet" id="sheet" hidden role="dialog" aria-modal="true" aria-labelledby="sheet-title">
+  <div class="sheet-scrim" data-close></div>
+  <div class="sheet-panel" id="sheet-panel">
+    <div class="bd-wrap" id="sheet-bg"></div>
+    <div id="sheet-head"></div><div id="sheet-seasons"></div><div id="sheet-body"></div>
+  </div>
+</div>
 <script>
 'use strict';
 const $ = (id) => document.getElementById(id);
@@ -187,340 +227,107 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '
 const MB = 1024 * 1024;
 const nf = new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 });
 const MARK = { good: '●', warn: '▲', bad: '■', idle: '○' };
-
+const ACTIVE = ['queued', 'starting', 'downloading', 'waiting'];
+const lv = (level, text) => `<span class="lv-${level}" aria-hidden="true">${MARK[level] || MARK.idle}</span>${text ? ` ${esc(text)}` : ''}`;
+const pct = (f) => Math.floor((f || 0) * 100);
+const bytes = (b) => b == null ? '—' : b >= 1024 * MB ? `${nf.format(b / 1024 / MB)} GB` : `${Math.round(b / MB)} MB`;
+const span = (s) => s < 60 ? `${Math.round(s)} s` : s < 3600 ? `${Math.round(s / 60)} min` : `${Math.floor(s / 3600)} h ${Math.round(s / 60) % 60} min`;
+const ago = (s) => s == null ? '' : s < 10 ? 'just now' : s < 60 ? `${Math.round(s)} s ago` : s < 3600 ? `${Math.round(s / 60)} min ago`
+  : s < 86400 ? `${Math.round(s / 3600)} h ago` : `${Math.round(s / 86400)} days ago`;
 function clock(s) {
   s = Math.max(0, Math.round(s));
   const h = Math.floor(s / 3600), m = Math.floor(s / 60) % 60, sec = String(s % 60).padStart(2, '0');
   return h ? `${h}:${String(m).padStart(2, '0')}:${sec}` : `${m}:${sec}`;
 }
-const bytes = (b) => b == null ? '—' : b >= 1024 * MB ? `${nf.format(b / 1024 / MB)} GB` : `${Math.round(b / MB)} MB`;
-const span = (s) => s < 60 ? `${Math.round(s)} s` : s < 3600 ? `${Math.round(s / 60)} min`
-  : s < 86400 ? `${Math.floor(s / 3600)} h ${Math.round(s / 60) % 60} min` : `${nf.format(s / 86400)} days`;
-const ago = (s) => s == null ? '' : s < 10 ? 'just now' : s < 60 ? `${Math.round(s)} s ago` : s < 3600 ? `${Math.round(s / 60)} min ago` : `${nf.format(s / 3600)} h ago`;
-const lv = (level, text) => `<span class="lv-${level}" aria-hidden="true">${MARK[level]}</span> ${esc(text)}`;
-const signal = (dbm) => dbm == null ? '' : dbm >= -55 ? lv('good', 'excellent') : dbm >= -67 ? lv('good', 'good') : dbm >= -75 ? lv('warn', 'fair') : lv('bad', 'weak');
-const row = (k, v) => v == null || v === '' ? '' : `<dt>${esc(k)}</dt><dd>${v}</dd>`;
 
-// ------------------------------------------------------------------ now playing
+let STATE = null, lastOk = 0, timer = null;
+const notes = {};   // key -> { text, at }: the answer to the last request about it, shown for 15 s
 
-function strip(s) {
-  const W = 1000, H = 30, n = s.strip.length;
-  let rects = `<rect x="0" y="0" width="${W}" height="${H}" rx="4" fill="var(--track)"/>`;
-  // Runs of downloaded pieces; a partly downloaded bucket is drawn lighter.
-  for (let i = 0; i < n;) {
-    const f = s.strip[i];
-    if (!f) { i++; continue; }
-    let j = i;
-    while (j + 1 < n && Math.abs(s.strip[j + 1] - f) < 0.05) j++;
-    const op = f >= 0.95 ? 1 : 0.35 + 0.6 * f;
-    rects += `<rect x="${(i / n * W).toFixed(1)}" y="0" width="${((j - i + 1) / n * W).toFixed(1)}" height="${H}" fill="var(--have)" fill-opacity="${op}"/>`;
-    i = j + 1;
-  }
-  const x0 = s.position * W, x1 = Math.max(x0, s.ahead_end * W);
-  if (x1 - x0 > 0.5) rects += `<rect class="ahead" x="${x0.toFixed(1)}" y="0" width="${(x1 - x0).toFixed(1)}" height="${H}" fill="var(--ahead)"/>`;
-  for (const e of s.events || []) {
-    if (e.kind === 'seek' && e.pos != null) rects += `<rect x="${(e.pos * W - 1).toFixed(1)}" y="${H - 6}" width="2" height="6" fill="var(--ink-2)"/>`;
-  }
-  rects += `<rect x="${Math.max(0, x0 - 1.5).toFixed(1)}" y="0" width="3" height="${H}" fill="var(--ink)"/>`;
-  const at = s.position_s != null ? clock(s.position_s) : `${Math.round(s.position * 100)}%`;
-  const label = `Downloaded parts of the file; the TV has read up to ${at}${s.ahead_s != null ? `, ${clock(s.ahead_s)} buffered ahead` : ''}`;
-  const left = Math.min(96, Math.max(4, s.position * 100));
-  return `<figure class="strip">
-    <span class="head-label" style="left:${left}%">${esc(at)}</span>
-    <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="${esc(label)}">${rects}</svg>
-    <div class="axis"><span>${s.duration_s ? '0:00' : 'Start'}</span><span>${s.duration_s ? clock(s.duration_s) : 'End'}</span></div>
-    <figcaption class="legend">
-      <span><i style="background:var(--have)"></i>Downloaded</span>
-      <span><i style="background:var(--ahead)"></i>Buffered ahead</span>
-      <span><i class="line"></i>Read by the TV</span>
-    </figcaption></figure>`;
+function note(key) {
+  const n = notes[key];
+  return n && Date.now() - n.at < 15000 ? `<p class="note" role="status">${esc(n.text)}</p>` : '';
 }
 
-function spark(s) {
-  const pts = (s.history || []).map((h) => ({ t: h[0], v: s.ahead_s != null ? h[1] : h[3] })).filter((p) => p.v != null);
-  if (pts.length < 3) return '';
-  const unit = s.ahead_s != null ? 's' : 'MB';
-  const W = 600, H = 64, t0 = pts[0].t, t1 = pts[pts.length - 1].t, max = Math.max(...pts.map((p) => p.v), 1);
-  const x = (t) => (t1 > t0 ? (t - t0) / (t1 - t0) : 1) * W, y = (v) => H - 2 - v / max * (H - 6);
-  const line = pts.map((p, i) => `${i ? 'L' : 'M'}${x(p.t).toFixed(1)},${y(p.v).toFixed(1)}`).join('');
-  const mins = Math.max(1, Math.round((t1 - t0) / 60));
-  sparkData = { pts, x, y, W, unit };
-  return `<div class="spark"><p class="label">Buffered ahead, last ${mins} min</p>
-    <svg id="sparksvg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="Buffered ahead over the last ${mins} minutes, now ${unit === 's' ? clock(pts[pts.length - 1].v) : `${Math.round(pts[pts.length - 1].v)} MB`}">
-      <line x1="0" x2="${W}" y1="${H - 1}" y2="${H - 1}" stroke="var(--rule)" stroke-width="1" vector-effect="non-scaling-stroke"/>
-      <path d="${line}L${W},${H}L0,${H}Z" fill="var(--ahead)" fill-opacity="0.1"/>
-      <path d="${line}" fill="none" stroke="var(--ahead)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/>
-      <line id="cross" x1="0" x2="0" y1="0" y2="${H}" stroke="var(--ink-2)" stroke-width="1" vector-effect="non-scaling-stroke" visibility="hidden"/>
-    </svg><span class="tip" id="tip" hidden></span></div>`;
-}
-let sparkData = null;
-
-function hookSpark() {
-  const svg = $('sparksvg'), tip = $('tip'), cross = $('cross');
-  if (!svg || !sparkData) return;
-  const move = (ev) => {
-    const r = svg.getBoundingClientRect(), d = sparkData;
-    const fx = ((ev.touches ? ev.touches[0].clientX : ev.clientX) - r.left) / r.width * d.W;
-    let best = d.pts[0];
-    for (const p of d.pts) if (Math.abs(d.x(p.t) - fx) < Math.abs(d.x(best.t) - fx)) best = p;
-    const bx = d.x(best.t);
-    cross.setAttribute('x1', bx); cross.setAttribute('x2', bx); cross.setAttribute('visibility', 'visible');
-    tip.hidden = false;
-    tip.textContent = `${d.unit === 's' ? clock(best.v) : `${Math.round(best.v)} MB`} · ${ago(Date.now() / 1000 - best.t)}`;
-    tip.style.left = `${bx / d.W * r.width}px`;
-    tip.style.top = `${d.y(best.v) / 64 * r.height + 22}px`;
-  };
-  const leave = () => { tip.hidden = true; cross.setAttribute('visibility', 'hidden'); };
-  svg.addEventListener('pointermove', move); svg.addEventListener('pointerdown', move); svg.addEventListener('pointerleave', leave);
+// Write a region only when its HTML changed, so images aren't recreated and nothing flickers on every poll.
+function put(id, html) {
+  const el = $(id);
+  if (el && el.__html !== html) { el.innerHTML = html; el.__html = html; }
 }
 
-const EVENT_MARK = { seek: '↷', stall: '⏸', reread: '↺' };
-const CAUSE = { swarm: 'The torrent sent pieces too slowly', player: 'The player or the file\'s layout' };
-
-function poster(s) {
-  return s.poster ? `<img class="poster" src="${esc(s.poster)}" alt="" loading="lazy" referrerpolicy="no-referrer">`
-    : `<div class="poster ph" aria-hidden="true">${esc((s.title || '?').trim()[0] || '?')}</div>`;
+function backdrop(url, poster) {
+  const src = url || poster;
+  return src ? `<img class="bd${url ? '' : ' bd-poster'}" src="${esc(src)}" alt="" referrerpolicy="no-referrer">` : '';
 }
 
-function nowPlaying(state) {
-  const sessions = state.sessions || [];
-  const s = sessions.find((x) => x.live);
-  const earlier = sessions.filter((x) => !x.live);
-  if (!s) {
-    $('now').className = 'now empty';
-    $('now').innerHTML = `<h1>Start something on the TV</h1>
-      <p>It shows up here within a couple of seconds, with how much is buffered and, if it stalls, why.</p>
-      ${earlier.length ? '<p class="sub">Played earlier</p>' : ''}
-      ${earlier.length ? `<ul class="earlier">${earlier.map((e) => `<li><div><span>${esc(e.title)}${e.subtitle ? `, ${esc(e.subtitle.toLowerCase())}` : ''}</span>${nextLine(e.ih, e.next)}</div><span>${ago(e.ended_ago_s)}</span></li>`).join('')}</ul>` : ''}`;
-    sparkData = null;
-    return;
-  }
-  $('now').className = 'now';
-  const need = s.bitrate_mbps;
-  const ahead = s.ahead_s != null ? clock(s.ahead_s) : bytes(s.ahead_bytes);
-  $('now').innerHTML = `
-    <div class="np">${poster(s)}
-      <div><h1>${esc(s.title)}</h1>${s.subtitle ? `<p class="sub">${esc(s.subtitle)}</p>` : ''}
-        <p class="file"><span>${esc(s.file)}</span><span>${bytes(s.size)}</span></p></div></div>
-    ${strip(s)}
-    <div class="figures">
-      <div class="fig hero"><div class="label">Buffered ahead</div><div class="value">${esc(ahead)}</div>
-        <div class="note">${s.complete ? 'The rest of the file is on this Mac' : s.ahead_s != null ? `${bytes(s.ahead_bytes)} ready on this Mac` : 'Bitrate not known yet'}</div></div>
-      <div class="fig"><div class="label">Download</div><div class="value">${nf.format(s.download_mbps)} Mbps</div>
-        <div class="note">${need ? `${need < s.download_mbps ? lv('good', '') : lv('warn', '')}file needs ${nf.format(need)}` : 'file bitrate not known yet'}</div></div>
-      <div class="fig"><div class="label">Peers</div><div class="value">${s.peers.connected}</div>
-        <div class="note">${s.peers.sending} sending, ${s.peers.seeds} seeds</div></div>
-    </div>
-    ${spark(s)}
-    <ul class="chips" aria-label="What the file contains">${s.chips.map((c) => `<li>${esc(c)}</li>`).join('')}
-      <li class="proof">${s.verified ? 'Read from the file itself' : 'Guessed from the file name'}</li></ul>
-    ${s.mp4_fix ? `<p class="fix">${esc(s.mp4_fix)}.</p>` : ''}
-    ${nextLine(s.ih, s.next)}
-    ${s.events.length ? `<ol class="events" aria-label="Recent seeks and stalls">${s.events.map((e) => `
-      <li><span aria-hidden="true">${EVENT_MARK[e.kind] || '•'}</span>
-        <span>${esc(e.text)}${e.cause ? `<span class="why">${esc(CAUSE[e.cause] || e.cause)}</span>` : ''}</span>
-        <time>${ago(state.now - e.at)}</time></li>`).join('')}</ol>` : ''}`;
-  hookSpark();
+function poster(url, title, cls = 'poster') {
+  return url ? `<img class="${cls}" src="${esc(url)}" alt="" loading="lazy" referrerpolicy="no-referrer">`
+    : `<span class="${cls} ph" aria-hidden="true">${esc((title || '?').trim()[0] || '?')}</span>`;
 }
 
-// ------------------------------------------------------------------ downloads for later
-
-let JOBS = new Map();                    // 'ih:idx' -> the server's prefetch job
-const prefetchMsg = {};                  // 'ih:idx' -> {text, at}: why the last request for it was refused
-const ACTIVE = ['queued', 'starting', 'downloading', 'waiting'];
-const active = (j) => j && ACTIVE.includes(j.state);
-
-function jobDetail(j) {
+function jobLine(j) {
+  if (!j) return '';
   if (j.state === 'queued') return 'Queued after the current download';
   if (j.state === 'starting') return 'Starting';
   if (j.state === 'waiting') return j.message || 'Waiting';
-  if (j.mbps === 0) return ['Nothing is arriving right now', j.message].filter(Boolean).join(' · ');
-  return [j.mbps != null ? `${nf.format(j.mbps)} Mbps` : null, j.eta_s != null ? `about ${span(j.eta_s)} left` : null,
+  if (j.mbps === 0) return 'Nothing is arriving right now';
+  return [`${pct(j.done)}%`, j.mbps != null ? `${nf.format(j.mbps)} Mbps` : null, j.eta_s != null ? `about ${span(j.eta_s)} left` : null,
     j.message].filter(Boolean).join(' · ');
 }
 
-const bar = (done, what) => `<span class="bar" role="img" aria-label="${Math.floor(done * 100)}% ${what}"><b style="width:${(done * 100).toFixed(1)}%"></b></span>`;
+// ---------------------------------------------------------------- the banner and the glance
 
-// The episode after `next.idx`'s predecessor: a button to download it, its download under way, or that it's here.
-function nextLine(ih, n) {
-  if (!n) return '';
-  const key = `${ih}:${n.idx}`, j = JOBS.get(key), m = prefetchMsg[key];
-  const note = m && Date.now() - m.at < 15000 ? `<p class="msg" aria-live="polite">${esc(m.text)}</p>` : '';
-  if (active(j)) {
-    const d = jobDetail(j);
-    return `<div class="next"><p>Downloading ${esc(n.label)} for later: ${Math.floor(j.done * 100)}%${d ? `<span class="q">${esc(d)}</span>` : ''}</p>
-      <button class="get small" type="button" data-cancel="${esc(ih)}" data-idx="${Number(n.idx)}">Cancel</button>${bar(j.done, 'downloaded')}${note}</div>`;
+function problemHTML(p, offline) {
+  if (offline) {
+    return `<div class="banner banner-bad" role="alert">${lv('bad', '')}<div><b>Can't reach the torrent server</b><p>${esc(offline)}</p></div></div>`;
   }
-  if (n.done >= 1 || (j && j.state === 'done')) return `<div class="next"><p>${lv('good', `${n.label} is on this Mac`)}</p></div>`;
-  const left = n.length * (1 - n.done);
-  const size = n.done >= 0.01 ? `${bytes(left)} to go, ${Math.floor(n.done * 100)}% is here` : bytes(n.length);
-  const failed = j && j.state === 'failed' ? `<p class="msg">The last try stopped: ${esc(j.message || 'unknown error')}</p>` : '';
-  return `<div class="next"><p>Next: ${esc(n.label)}<span class="q">${esc(size)}</span></p>
-    <button class="get" type="button" data-get="${esc(ih)}" data-idx="${Number(n.idx)}" data-label="${esc(n.label)}" data-left="${Math.round(left)}">${n.done >= 0.01 ? 'Download the rest' : 'Download for later'}</button>${failed}${note}</div>`;
+  if (!p) return '';
+  return `<div class="banner banner-${p.level}" role="alert">${lv(p.level, '')}<div><b>${esc(p.title)}</b>${p.advice ? `<p>${esc(p.advice)}</p>` : ''}</div></div>`;
 }
 
-// ------------------------------------------------------------------ the quieter sections
-
-function tvSection(tv, net) {
-  const h = '<h2 id="tv-h">TV</h2>';
-  if (!tv) return `${h}<p class="lead">Waiting for the first reading.</p>`;
-  const why = {
-    unreachable: 'The TV isn\'t answering. It may be off or asleep.',
-    unauthorized: 'Accept "Allow debugging?" on the TV to see its details here.',
-    'no-adb': 'Turn on USB debugging on the TV (Developer options) to see its details here.',
-    off: tv.why === 'adb is not installed' ? 'Install adb on this Mac to see the TV\'s details: brew install --cask android-platform-tools'
-      : 'The TV shows up here once it has played something through this server.',
-  }[tv.state];
-  if (tv.state !== 'ok') return `${h}<p class="lead">${esc(why || 'No details yet.')}</p>`;
-  const w = tv.wifi || {}, m = tv.memory || {}, p = tv.player || {}, st = tv.stremio;
-  const low = m.available_mb != null && m.available_mb < 400;
-  return `${h}<dl class="kv">
-    ${row('Model', esc(`${tv.model || ''}${tv.android ? `, Android ${tv.android}` : ''}`))}
-    ${row('Player', esc(p.name || 'not playing'))}
-    ${row('Video decoder', p.video_decoder ? esc(p.video_decoder.replace(/^(OMX|c2)\.[a-z]+\./i, '').replace(/\.decoder.*$/, '')) : null)}
-    ${row('Audio', p.dts_on_tv ? 'DTS decoded by the TV' : null)}
-    ${row('Wi-Fi', w.rssi != null ? `${esc(w.band || '')} ${w.rssi} dBm <span class="q">${signal(w.rssi)}</span>` : null)}
-    ${row('Link speed', w.link ? `${w.link} Mbps` : null)}
-    ${row('Free memory', m.available_mb != null ? `${low ? lv('warn', '') : ''}${m.available_mb} of ${m.total_mb} MB` : null)}
-    ${row('Stremio', st ? `${nf.format(st.cpu)}% CPU, ${esc(st.memory)}` : null)}
-  </dl>
-  ${p.error ? `<p class="alert">Last player error${p.error_at ? ` at ${esc(p.error_at)}` : ''}: ${esc(p.error)}</p>` : ''}
-  ${p.name === 'mpv' ? '<p class="alert warn">This title plays in mpv. Stremio remembers a player per title; ExoPlayer is the one that handles Dolby Vision on Android TVs.</p>' : ''}
-  ${p.low_memory_kills ? `<p class="alert warn">Android closed ${p.low_memory_kills} app${p.low_memory_kills > 1 ? 's' : ''} recently to free memory.</p>` : ''}`;
+function scrubber(g) {
+  const W = 1000, H = 8, n = g.strip.length;
+  let r = `<rect width="${W}" height="${H}" rx="4" fill="var(--track)"/>`;
+  for (let i = 0; i < n;) {
+    if (g.strip[i] < 0.5) { i++; continue; }
+    let j = i;
+    while (j + 1 < n && g.strip[j + 1] >= 0.5) j++;
+    r += `<rect x="${(i / n * W).toFixed(1)}" width="${((j - i + 1) / n * W).toFixed(1)}" height="${H}" rx="4" fill="var(--have)"/>`;
+    i = j + 1;
+  }
+  const x0 = g.position * W, x1 = Math.max(x0, g.ahead_end * W);
+  if (x1 - x0 > 0.5) r += `<rect x="${x0.toFixed(1)}" width="${(x1 - x0).toFixed(1)}" height="${H}" fill="var(--ahead)"/>`;
+  for (const p of g.seeks || []) r += `<rect x="${(p * W - 1).toFixed(1)}" y="${H + 1}" width="2" height="3" fill="var(--muted)"/>`;
+  const label = `${g.title}: up to ${g.elapsed}; ${g.complete ? 'the rest is on this Mac' : `${g.ahead} downloaded ahead`}`;
+  return `<div class="scrub" data-scrub>
+    <svg viewBox="0 0 ${W} 12" preserveAspectRatio="none" role="img" aria-label="${esc(label)}">${r}</svg>
+    <span class="head" style="left:${(g.position * 100).toFixed(2)}%"></span>
+    <div class="scrub-axis"><span>${esc(g.elapsed)}</span><span>${esc(g.remaining || '')}</span></div>
+    <span class="tip" id="scrub-tip" hidden></span></div>`;
 }
 
-function networkSection(n) {
-  const w = n.mac_wifi, p = n.tv_ping;
-  const ping = !p ? null : p.ms == null ? lv('bad', 'no answer')
-    : `${nf.format(p.ms)} ms <span class="q">${p.ms < 10 ? lv('good', 'good') : p.ms < 50 ? lv('warn', 'slow') : lv('bad', 'very slow')}</span>`;
-  return `<h2 id="net-h">Network</h2><dl class="kv">
-    ${row('Mac Wi-Fi', w ? `${esc(w.band || '')}${w.channel ? `, channel ${w.channel}` : ''}` : 'not on Wi-Fi')}
-    ${row('Mac signal', w && w.rssi != null ? `${w.rssi} dBm <span class="q">${signal(w.rssi)}</span>` : null)}
-    ${row('Mac link speed', w && w.rate ? `${w.rate} Mbps` : null)}
-    ${row('Ping to the TV', ping)}
-    ${row('TV address', n.tv_ip ? esc(n.tv_ip) : null)}
-  </dl>${p && p.ms != null && p.ms >= 50 ? '<p class="alert warn">The TV is slow to answer. Restarting the TV usually clears a stuck Wi-Fi connection.</p>' : ''}`;
+function glanceHTML(g, idleText) {
+  if (!g) return `<p class="idle-line">${lv('idle', idleText || 'Nothing is playing')}</p>`;
+  const ahead = g.complete ? 'The rest is on this Mac' : `<b>${esc(g.ahead)}</b> ready ahead of you`;
+  return `<div class="g-body">
+    <p class="g-status">${lv(g.level, g.word)} <span class="muted">on the TV</span></p>
+    <h1 class="g-title">${esc(g.title)}</h1>
+    ${g.subtitle ? `<p class="g-sub">${esc(g.subtitle)}</p>` : ''}
+    <p class="g-ahead">${ahead}</p>
+    ${scrubber(g)}
+    <p class="g-stats">${esc(g.stats)}</p>
+    <ul class="chips" aria-label="What the file contains">${(g.chips || []).map((c) => `<li>${esc(c)}</li>`).join('')}<li class="proof">${g.verified ? 'read from the file' : 'guessed from its name'}</li></ul>
+  </div>`;
 }
 
-function macSection(srv, phone) {
-  const c = srv.cache;
-  const pct = c ? Math.min(100, c.used / c.budget * 100) : 0;
-  return `<h2 id="mac-h">This Mac</h2><dl class="kv">
-    ${row('Torrent server', srv.cpu != null ? `${nf.format(srv.cpu)}% CPU, ${srv.rss_mb} MB` : null)}
-    ${row('Running for', span(srv.uptime_s))}
-    ${row('Download limit', srv.download_cap_mbps ? `${srv.download_cap_mbps} Mbps` : 'none')}
-    ${row('Torrent cache', c ? `${bytes(c.used)} of ${bytes(c.budget)}<div class="meter" role="img" aria-label="${Math.round(pct)}% of the cache budget used"><b style="width:${pct.toFixed(1)}%"></b></div>` : null)}
-    ${row('Free disk', c ? bytes(c.free) : null)}
-    ${row('Learning from plays', srv.learning ? 'on' : 'off')}
-  </dl>${phone ? `<p class="lead" style="margin-top:12px">Open on your phone</p><button class="copy" type="button" data-copy="${esc(phone)}">${esc(phone)}</button>` : ''}`;
-}
-
-function librarySection(lib) {
-  if (!lib) return '<h2 id="lib-h">Library</h2><p class="lead">The Local Library addon isn\'t answering.</p>';
-  const a = lib.advisor;
-  return `<h2 id="lib-h">Library</h2><dl class="kv">
-    ${row('Movies on this Mac', lib.movies)}
-    ${row('Shows', lib.shows)}
-    ${row('Other videos', lib.other)}
-    ${row('Stream ratings', a ? `from ${esc((a.upstreams || []).join(', ') || 'no addon')}` : 'off')}
-    ${row('Files checked', a ? a.facts : null)}
-  </dl>${a ? `<p class="lead" style="margin-top:10px">Rated for ${esc(a.profile)}</p>` : ''}
-  ${lib.account ? `<p class="lead">${lv(lib.account.ok ? 'good' : 'warn', lib.account.text)}</p>` : ''}`;
-}
-
-let cacheMsg = '';
-
-// "S01E02" when the file name has an episode code, else the name itself, shortened.
-function fileLabel(name) {
-  const m = /\bS(\d{1,2})[ ._-]?E(\d{1,3})\b/i.exec(name) || /\b(\d{1,2})x(\d{2,3})\b/.exec(name);
-  if (m) return `S${m[1].padStart(2, '0')}E${m[2].padStart(2, '0')}`;
-  const base = name.replace(/\.[a-z0-9]{2,4}$/i, '');
-  return base.length > 42 ? `${base.slice(0, 40)}…` : base;
-}
-
-function cacheSection(rows, srv, state) {
-  const h = '<h2 id="cache-h">Downloaded torrents</h2>';
-  if (!rows) return `${h}<p class="lead">Reading the cache…</p>`;
-  const budget = srv && srv.cache ? ` Beyond ${bytes(srv.cache.budget)}, the oldest are deleted automatically.` : '';
-  const idle = rows.filter((r) => !r.in_use);
-  const idleBytes = idle.reduce((a, r) => a + r.bytes, 0);
-  const now = Date.now() / 1000;
-  if (!rows.length) return `${h}<p class="lead">Nothing is stored. Torrents you play are kept here for rewinds and re-watching.</p>`;
-  return `${h}<p class="lead">Kept on this Mac for rewinds and re-watching.${budget}</p>
-    <ul class="cache-list">${rows.map((r) => {
-      const many = (r.files || []).length > 1;
-      const jobs = (state.prefetch || []).filter((j) => j.ih === r.ih && active(j));
-      const files = (r.files || []).filter((f) => !jobs.some((j) => j.idx === f.idx));
-      return `<li>
-      <div><span class="c-title">${esc(r.title || (r.name === r.ih.slice(0, 8) ? `Unknown torrent ${r.name}` : r.name))}</span>${r.title ? `<span class="c-sub">${esc(r.name)}</span>` : ''}
-        ${files.length || jobs.length ? `<ul class="c-files">${jobs.map((j) => {
-          const d = jobDetail(j);
-          return `<li><span>${esc(j.label)}: downloading for later, ${Math.floor(j.done * 100)}% of ${bytes(j.length)}${d ? `<span class="q">${esc(d)}</span>` : ''}</span>
-            <button class="f-act get small" type="button" data-cancel="${esc(j.ih)}" data-idx="${Number(j.idx)}">Cancel</button>${bar(j.done, 'downloaded')}</li>`;
-        }).join('')}${files.map((f) => {
-          const job = JOBS.get(`${r.ih}:${f.idx}`);
-          if (job) f = Object.assign({}, f, { done: Math.max(f.done, job.done) });   // fresher than the cache list
-          const pct = Math.floor(f.done * 100);
-          const label = fileLabel(f.name);
-          const act = !many ? '' : f.busy ? '<span class="f-act inuse">Being read</span>'
-            : `<button class="f-act del small" type="button" data-delfile="${esc(r.ih)}" data-idx="${Number(f.idx)}"
-                data-label="${esc(label)}" data-size="${esc(bytes(f.length * f.done))}">Delete</button>`;
-          return `<li><span>${esc(label)}: ${pct}% of ${bytes(f.length)}</span>${act}${bar(f.done, 'downloaded')}</li>`;
-        }).join('')}</ul>` : ''}
-        ${jobs.length ? '' : nextLine(r.ih, r.next)}
-        <span class="c-meta">${r.bytes ? `${bytes(r.bytes)} on disk` : 'Nothing downloaded'}, used ${ago(now - r.last_used)}</span></div>
-      ${r.in_use ? '<span class="inuse">In use</span>'
-        : `<button class="del" type="button" data-del="${esc(r.ih)}" data-label="${esc((r.title || r.name) + (many ? ', every file' : ''))}" data-size="${esc(bytes(r.bytes))}">${many ? 'Delete all' : 'Delete'}</button>`}
-    </li>`; }).join('')}</ul>
-    ${idle.length > 1 ? `<button class="clear" type="button" data-clear="${idle.length}" data-size="${esc(bytes(idleBytes))}">Delete all ${idle.length} not in use (${bytes(idleBytes)})</button>` : ''}
-    <p class="cache-msg" aria-live="polite">${esc(cacheMsg)}</p>`;
-}
-
-async function change(path, body) {
-  try {
-    const r = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Dashboard': '1' },
-      body: JSON.stringify(body || {}) });
-    const out = await r.json();
-    cacheMsg = out.ok ? `${out.message}, ${bytes(out.freed)} freed.` : out.message;
-  } catch (e) { cacheMsg = 'The server didn\'t answer. Nothing was deleted.'; }
-  poll();
-}
-
-async function prefetch(path, ih, idx) {
-  const key = `${ih}:${idx}`;
-  try {
-    const r = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Dashboard': '1' },
-      body: JSON.stringify({ ih, idx }) });
-    const out = await r.json();
-    if (out.ok) delete prefetchMsg[key]; else prefetchMsg[key] = { text: out.message, at: Date.now() };
-  } catch (e) { prefetchMsg[key] = { text: 'The server didn\'t answer.', at: Date.now() }; }
-  poll();
-}
-
-function logSection(lines) {
-  $('loglines').innerHTML = lines.slice().reverse().map((l) => `<li><time>${esc(l.time)}</time><span>${esc(l.text)}</span></li>`).join('');
-}
-
-// ------------------------------------------------------------------ polling
-
-let lastOk = 0, timer = null;
-
-let STATE = null;
+// ---------------------------------------------------------------- rendering and polling
 
 function render(state) {
   STATE = state;
-  JOBS = new Map((state.prefetch || []).map((j) => [`${j.ih}:${j.idx}`, j]));
-  const h = state.health;
-  $('mark').className = `mark lv-${h.level}`;
-  $('mark').textContent = MARK[h.level];
-  $('health').textContent = h.text;
-  nowPlaying(state);
-  $('tv').innerHTML = tvSection(state.tv, state.network);
-  $('network').innerHTML = networkSection(state.network);
-  $('mac').innerHTML = macSection(state.server, state.phone_url);
-  $('library').innerHTML = librarySection(state.library);
-  $('cache').innerHTML = cacheSection(state.cache, state.server, state);
-  logSection(state.log || []);
+  put('problem', problemHTML(state.problem));
+  const g = state.glance;
+  $('glance-wrap').className = g ? 'cine glance live' : 'glance idle';
+  put('glance-bg', g ? backdrop(g.backdrop, g.poster) : '');
+  put('glance', glanceHTML(g, state.idle_text));
 }
 
 async function poll() {
@@ -531,55 +338,33 @@ async function poll() {
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     state = await r.json();
     lastOk = Date.now();
-    $('fresh').textContent = '';
   } catch (e) {
-    $('mark').className = 'mark lv-bad';
-    $('mark').textContent = MARK.bad;
-    $('health').textContent = 'Can\'t reach the torrent server';
-    $('fresh').textContent = lastOk ? `last update ${ago((Date.now() - lastOk) / 1000)}` : '';
+    put('problem', problemHTML(null, lastOk ? `Last update ${ago((Date.now() - lastOk) / 1000)}. It restarts by itself after a moment.`
+      : 'It restarts by itself after a moment.'));
   }
   if (state) {
-    try { render(state); } catch (e) {
-      console.error(e);
-      $('fresh').textContent = 'Part of this page failed to update — reload it';
-    }
+    try { render(state); } catch (e) { console.error(e); }
   }
   if (!document.hidden) timer = setTimeout(poll, 2000);
 }
 
+// The scrubber: the time under the pointer (or finger), and whether that part is on the Mac.
+function scrubTip(ev) {
+  const s = ev.target.closest && ev.target.closest('[data-scrub]');
+  const tip = $('scrub-tip');
+  if (!tip) return;
+  const g = STATE && STATE.glance;
+  if (!s || !g) { tip.hidden = true; return; }
+  const box = s.getBoundingClientRect();
+  const f = Math.min(1, Math.max(0, (ev.clientX - box.left) / box.width));
+  const here = g.strip[Math.min(g.strip.length - 1, Math.floor(f * g.strip.length))] >= 0.5;
+  tip.textContent = `${g.duration_s ? clock(f * g.duration_s) : `${Math.round(f * 100)}%`} · ${here ? 'on this Mac' : 'not downloaded yet'}`;
+  tip.style.left = `${f * 100}%`;
+  tip.hidden = false;
+}
+document.addEventListener('pointermove', scrubTip);
+document.addEventListener('pointerdown', scrubTip);
 document.addEventListener('visibilitychange', () => { if (!document.hidden) poll(); });
-document.addEventListener('click', (ev) => {
-  const del = ev.target.closest('[data-del]');
-  if (del && confirm(`Delete “${del.dataset.label}” (${del.dataset.size})? It downloads again if you play it.`)) {
-    change('/ui/api/cache/delete', { ih: del.dataset.del });
-  }
-  const one = ev.target.closest('[data-delfile]');
-  if (one && confirm(`Delete ${one.dataset.label} (${one.dataset.size}) from this Mac? It downloads again if you play it.`)) {
-    change('/ui/api/cache/delete-file', { ih: one.dataset.delfile, idx: Number(one.dataset.idx) });
-  }
-  const get = ev.target.closest('[data-get]');
-  if (get) {
-    const left = Number(get.dataset.left), c = STATE && STATE.server && STATE.server.cache;
-    const over = c && c.used + left > c.budget
-      ? ` That takes the downloads past their ${bytes(c.budget)} limit, so the oldest ones not in use are deleted to make room.` : '';
-    if (confirm(`Download ${get.dataset.label} (${bytes(left)}) to this Mac for later? It downloads whenever the TV doesn't need the bandwidth.${over}`)) {
-      prefetch('/ui/api/prefetch', get.dataset.get, Number(get.dataset.idx));
-    }
-  }
-  const stop = ev.target.closest('[data-cancel]');
-  if (stop) prefetch('/ui/api/prefetch/cancel', stop.dataset.cancel, Number(stop.dataset.idx));
-  const clr = ev.target.closest('[data-clear]');
-  if (clr && confirm(`Delete ${clr.dataset.clear} downloaded torrents (${clr.dataset.size})? Anything playing now is kept.`)) {
-    change('/ui/api/cache/clear');
-  }
-});
-document.addEventListener('click', async (ev) => {
-  const b = ev.target.closest('[data-copy]');
-  if (!b) return;
-  try { await navigator.clipboard.writeText(b.dataset.copy); b.textContent = 'Copied'; } catch { /* not allowed over plain HTTP */ }
-  setTimeout(() => { b.textContent = b.dataset.copy; }, 1500);
-});
-if (matchMedia('(min-width: 760px)').matches) $('log').open = true;
 poll();
 </script>
 </body>
