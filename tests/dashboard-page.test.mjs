@@ -250,3 +250,10 @@ test('the chain\'s steps and the folded sections are big enough to tap', () => {
   assert.ok(minHeight('.step-head') >= 40, '.step-head');
   assert.ok(minHeight('details summary') >= 40, 'details summary');
 });
+
+test('the chain marks each step with the reserved symbols, never colour alone', () => {
+  const { ctx } = page();
+  const steps = CHAIN.map((s) => (s.id === 'swarm' ? { ...s, level: 'bad', reason: 'Stalled, waiting for pieces' } : s));
+  const marks = [...ctx.chainHTML(steps).matchAll(/class="dot dot-(\w+)"[^>]*>([^<]*)</g)].map((m) => [m[1], m[2]]);
+  assert.deepEqual(marks, [['bad', '■'], ['good', '●'], ['warn', '▲'], ['idle', '○']]);
+});

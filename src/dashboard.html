@@ -165,11 +165,12 @@ select { font-weight: 600; color: var(--ink); background: var(--raise); border: 
 /* the chain from the swarm to the TV */
 .side-card { background: var(--raise); border-radius: 18px; padding: 16px; }
 .chain { margin-top: 12px; }
-.step { position: relative; padding: 0 0 16px 28px; }
+.step { position: relative; display: flow-root; padding: 0 0 16px 28px; }   /* flow-root: the step button's negative margins stay inside */
 .step::before { content: ""; position: absolute; left: 7px; top: 20px; bottom: -2px; width: 2px; background: var(--rule); }
 .step:last-child { padding-bottom: 0; } .step:last-child::before { display: none; }
-.dot { position: absolute; left: 0; top: 3px; width: 16px; height: 16px; border-radius: 50%; display: grid; place-items: center; font-size: 10px; font-weight: 800; color: var(--bg); }
-.dot-good { background: var(--good); } .dot-warn { background: var(--warn); } .dot-bad { background: var(--bad); } .dot-idle { background: var(--idle); }
+/* the reserved marks (● ▲ ■ ○) on the rail, on the card's colour so the line stops at them */
+.dot { position: absolute; left: 0; top: 2px; width: 16px; height: 18px; display: grid; place-items: center; font-size: 13px; line-height: 1; background: var(--raise); }
+.dot-good { color: var(--good); } .dot-warn { color: var(--warn); } .dot-bad { color: var(--bad); } .dot-idle { color: var(--idle); }
 /* the whole row is the target, 40 px tall, laid out as if it were the 24 px line it looks like */
 .step-head { background: none; border: 0; padding: 0; cursor: pointer; font-weight: 650; font-size: 14.5px; min-height: 40px; margin: -8px 0;
   display: flex; align-items: center; gap: 4px; width: 100%; text-align: left; }
@@ -505,7 +506,6 @@ async function act(path, body, key) {
 // ---------------------------------------------------------------- from the swarm to the TV, recent, the log
 
 var openSteps = new Set();   // the steps opened for their details (var: the page tests reach it)
-const STEP_MARK = { good: '✓', warn: '!', bad: '!', idle: '' };
 const LEVEL_WORD = { good: 'fine', warn: 'needs a look', bad: 'problem', idle: 'not in use' };
 
 function chainHTML(steps) {
@@ -514,7 +514,7 @@ function chainHTML(steps) {
     const open = openSteps.has(s.id);
     const kv = (s.services || []).map((v) => `<dt>${esc(v.name)}</dt><dd>${esc(v.text)}</dd>`).join('')
       + s.details.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('');
-    return `<li class="step step-${s.level}"><span class="dot dot-${s.level}" aria-hidden="true">${STEP_MARK[s.level]}</span>
+    return `<li class="step step-${s.level}"><span class="dot dot-${s.level}" aria-hidden="true">${MARK[s.level] || MARK.idle}</span>
       <button class="step-head" type="button" data-step="${s.id}" aria-expanded="${open}"><span class="step-name">${esc(s.name)}</span><span class="sr"> — ${LEVEL_WORD[s.level]}</span></button>
       ${s.reason ? `<p class="step-reason">${esc(s.reason)}</p>` : ''}
       <p class="step-line">${esc(s.line)}</p>
