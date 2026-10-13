@@ -239,3 +239,14 @@ test('the log lines, newest first', () => {
   assert.ok(h.indexOf('second') < h.indexOf('first'));
   assert.ok(h.includes('&lt;b&gt;second'));
 });
+
+test('the chain\'s steps and the folded sections are big enough to tap', () => {
+  const css = /<style>([\s\S]*)<\/style>/.exec(html)[1];
+  const minHeight = (selector) => {
+    const rule = new RegExp(`(?:^|\\n)${selector.replace(/[.[\]]/g, '\\$&')} \\{([^}]*)\\}`).exec(css);
+    assert.ok(rule, selector);
+    return Number((/min-height: (\d+)px/.exec(rule[1]) || [])[1] || 0);
+  };
+  assert.ok(minHeight('.step-head') >= 40, '.step-head');
+  assert.ok(minHeight('details summary') >= 40, 'details summary');
+});
