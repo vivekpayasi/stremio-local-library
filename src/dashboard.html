@@ -490,6 +490,62 @@ async function act(path, body, key) {
   poll();
 }
 
+// ---------------------------------------------------------------- from the swarm to the TV, recent, the log
+
+var openSteps = new Set();   // the steps opened for their details (var: the page tests reach it)
+const STEP_MARK = { good: '✓', warn: '!', bad: '!', idle: '' };
+const LEVEL_WORD = { good: 'fine', warn: 'needs a look', bad: 'problem', idle: 'not in use' };
+
+function chainHTML(steps) {
+  if (!steps) return '';
+  return `<h2 class="eyebrow">From the swarm to your TV</h2><ol class="chain">${steps.map((s) => {
+    const open = openSteps.has(s.id);
+    const kv = (s.services || []).map((v) => `<dt>${esc(v.name)}</dt><dd>${esc(v.text)}</dd>`).join('')
+      + s.details.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('');
+    return `<li class="step step-${s.level}"><span class="dot dot-${s.level}" aria-hidden="true">${STEP_MARK[s.level]}</span>
+      <button class="step-head" type="button" data-step="${s.id}" aria-expanded="${open}"><span class="step-name">${esc(s.name)}</span><span class="sr"> — ${LEVEL_WORD[s.level]}</span></button>
+      ${s.reason ? `<p class="step-reason">${esc(s.reason)}</p>` : ''}
+      <p class="step-line">${esc(s.line)}</p>
+      ${s.services ? `<ul class="svc">${s.services.map((v) => `<li>${lv(v.level, v.name)}</li>`).join('')}</ul>` : ''}
+      ${open && kv ? `<dl class="kv">${kv}</dl>` : ''}</li>`;
+  }).join('')}</ol>`;
+}
+
+const EVENT_MARK = { seek: '↷', stall: '⏸', buffering: '⏸', startup: '…', reread: '↺' };
+const CAUSE = { swarm: 'The torrent sent pieces too slowly', player: 'The player or the file\'s layout' };
+let recentOpen = null;   // what the viewer chose; until then, open while something plays
+let sparkPts = null;     // the sparkline's points, for its tooltip
+
+function sparkHTML(r) {
+  const pts = (r.history || []).map((h) => ({ t: h[0], v: r.unit === 's' ? h[1] : h[3] })).filter((p) => p.v != null);
+  if (pts.length < 3) return '';
+  const W = 600, H = 56, t0 = pts[0].t, t1 = pts[pts.length - 1].t, max = Math.max(...pts.map((p) => p.v), 1);
+  const x = (t) => (t1 > t0 ? (t - t0) / (t1 - t0) : 1) * W, y = (v) => H - 2 - v / max * (H - 6);
+  const line = pts.map((p, i) => `${i ? 'L' : 'M'}${x(p.t).toFixed(1)},${y(p.v).toFixed(1)}`).join('');
+  const last = pts[pts.length - 1].v, mins = Math.max(1, Math.round((t1 - t0) / 60));
+  const now = r.unit === 's' ? clock(last) : `${Math.round(last)} MB`;
+  sparkPts = { pts, unit: r.unit };
+  return `<div class="spark" data-spark><p class="label">Buffered ahead, last ${mins} min</p><span class="cross" id="spark-cross" hidden></span><span class="tip" id="spark-tip" hidden></span>
+    <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="Buffered ahead over the last ${mins} minutes, now ${now}">
+      <line x1="0" x2="${W}" y1="${H - 1}" y2="${H - 1}" stroke="var(--rule)" stroke-width="1" vector-effect="non-scaling-stroke"/>
+      <path d="${line}L${W},${H}L0,${H}Z" fill="var(--ahead)" fill-opacity="0.12"/>
+      <path d="${line}" fill="none" stroke="var(--ahead)" stroke-width="2" stroke-linejoin="round" vector-effect="non-scaling-stroke"/>
+    </svg></div>`;
+}
+
+function recentHTML(r, now) {
+  if (!r) return '';
+  const open = recentOpen === null ? r.live : recentOpen;
+  const events = r.events.length ? `<ol class="events">${r.events.map((e) => `<li><span aria-hidden="true">${EVENT_MARK[e.kind] || '•'}</span>
+      <span>${esc(e.text)}${e.cause ? `<span class="why">${esc(CAUSE[e.cause] || e.cause)}</span>` : ''}</span><time>${ago(now - e.at)}</time></li>`).join('')}</ol>`
+    : '<p class="muted small">No seeks or stalls.</p>';
+  return `<details class="recent" id="recent-d"${open ? ' open' : ''}><summary>Recent</summary>${sparkHTML(r)}${events}</details>`;
+}
+
+function logHTML(lines) {
+  return (lines || []).slice().reverse().map((l) => `<li><time>${esc(l.time)}</time><span>${esc(l.text)}</span></li>`).join('');
+}
+
 // ---------------------------------------------------------------- rendering and polling
 
 function render(state) {
@@ -507,6 +563,9 @@ function render(state) {
   put('shelf', shelfHTML(state.shelf));
   for (const t of (state.shelf && state.shelf.items) || []) put(tileId(t.key), tileText(t));
   renderSheet();
+  put('chain', chainHTML(state.chain));
+  put('recent', recentHTML(state.recent, state.now));
+  put('loglines', logHTML(state.log));
 }
 
 async function poll() {
@@ -601,6 +660,35 @@ document.addEventListener('keydown', (ev) => {
   if (ev.shiftKey && document.activeElement === f[0]) { ev.preventDefault(); f[f.length - 1].focus(); }
   else if (!ev.shiftKey && document.activeElement === f[f.length - 1]) { ev.preventDefault(); f[0].focus(); }
 });
+// The sparkline: the nearest reading under the pointer (or finger), with a crosshair.
+function sparkTip(ev) {
+  const box = ev.target.closest && ev.target.closest('[data-spark]');
+  const tip = $('spark-tip'), cross = $('spark-cross');
+  if (!tip || !cross) return;
+  if (!box || !sparkPts) { tip.hidden = true; cross.hidden = true; return; }
+  const svg = box.querySelector('svg').getBoundingClientRect();
+  const { pts, unit } = sparkPts, t0 = pts[0].t, t1 = pts[pts.length - 1].t;
+  const at = t0 + Math.min(1, Math.max(0, (ev.clientX - svg.left) / svg.width)) * (t1 - t0);
+  const p = pts.reduce((a, b) => (Math.abs(b.t - at) < Math.abs(a.t - at) ? b : a));
+  const left = `${(t1 > t0 ? (p.t - t0) / (t1 - t0) : 1) * 100}%`;
+  tip.textContent = `${unit === 's' ? clock(p.v) : `${Math.round(p.v)} MB`} · ${ago(Date.now() / 1000 - p.t)}`;
+  tip.style.left = left; cross.style.left = left;
+  tip.hidden = false; cross.hidden = false;
+}
+document.addEventListener('pointermove', sparkTip);
+document.addEventListener('pointerdown', sparkTip);
+document.addEventListener('click', (ev) => {
+  const b = ev.target.closest && ev.target.closest('[data-step]');
+  if (!b) return;
+  const id = b.dataset.step;
+  if (openSteps.has(id)) openSteps.delete(id); else openSteps.add(id);
+  if (STATE) put('chain', chainHTML(STATE.chain));
+});
+document.addEventListener('toggle', (ev) => {
+  if (ev.target.id === 'recent-d') recentOpen = ev.target.open;
+  if (ev.target.id === 'log') { try { localStorage.setItem('dash.logOpen', ev.target.open ? '1' : '0'); } catch (e) { /* private mode */ } }
+}, true);
+try { if (localStorage.getItem('dash.logOpen') === '1') $('log').open = true; } catch (e) { /* private mode */ }
 poll();
 </script>
 </body>

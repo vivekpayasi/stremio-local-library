@@ -187,3 +187,43 @@ test('a sheet for a title that is gone says so', () => {
   ctx.renderSheet();
   assert.equal(els.sheet.hidden, true);
 });
+
+const CHAIN = [
+  { id: 'swarm', name: 'Swarm', level: 'good', line: '31 Mbps in, the file needs 15 · 38 peers, 12 sending', reason: null, advice: null, details: [['Download', '31.0 Mbps']] },
+  { id: 'mac', name: 'This Mac', level: 'good', line: 'up 16 h 6 min · cache 4.4 GB of 15.0 GB · 22.0 GB free', reason: null, advice: null, details: [],
+    services: [{ name: 'Torrent server', level: 'good', text: '3% CPU, 80 MB' }, { name: 'Library', level: 'good', text: '0 movies, 0 shows' },
+      { name: 'Stream Advisor', level: 'good', text: 'Rating streams for TCL' }, { name: 'Stremio account', level: 'warn', text: 'Signed out' }] },
+  { id: 'wifi', name: 'Wi-Fi', level: 'warn', line: 'ping to the TV 120 ms', reason: "The TV's Wi-Fi is slow to answer", advice: 'Restart the TV', details: [['Ping to the TV', '120 ms (usually 4)']] },
+  { id: 'tv', name: 'The TV', level: 'idle', line: 'Asleep — not answering', reason: null, advice: null, details: [] },
+];
+
+test('the chain: four steps, the weak one marked with its reason, services inside This Mac', () => {
+  const { ctx } = page();
+  const h = ctx.chainHTML(CHAIN);
+  assert.equal((h.match(/class="step /g) || []).length, 4);
+  assert.match(h, /step-warn[^]*The TV&#39;s Wi-Fi is slow to answer/);
+  for (const s of ['Torrent server', 'Library', 'Stream Advisor', 'Stremio account', 'Asleep — not answering']) assert.ok(h.includes(s), s);
+  assert.ok(!h.includes('120 ms (usually 4)'), 'details stay folded');
+  ctx.openSteps.add('wifi');
+  assert.ok(ctx.chainHTML(CHAIN).includes('120 ms (usually 4)'));
+  assert.equal(ctx.chainHTML(null), '');
+});
+
+test('Recent opens by itself while something plays, with the buffer and the events', () => {
+  const { ctx } = page();
+  const r = { live: true, unit: 's', history: [[1, 250, 30, 480], [3, 255, 30, 485], [5, 260, 31, 490]],
+    events: [{ kind: 'stall', text: 'Stalled for 6.0 s at 31:02', cause: 'swarm', at: 1e9 - 120, pos: 0.5, recent: false }] };
+  const h = ctx.recentHTML(r, 1e9);
+  assert.match(h, /<details class="recent" id="recent-d" open>/);
+  assert.ok(h.includes('Stalled for 6.0 s at 31:02') && h.includes('The torrent sent pieces too slowly') && h.includes('2 min ago'));
+  assert.ok(h.includes('<svg') && h.includes('id="spark-tip"'), 'the buffer sparkline, with its tooltip');
+  assert.ok(!ctx.recentHTML({ ...r, live: false }, 1e9).includes(' open>'));
+  assert.equal(ctx.recentHTML(null, 1e9), '');
+});
+
+test('the log lines, newest first', () => {
+  const { ctx } = page();
+  const h = ctx.logHTML([{ time: '18:04:56', text: 'first' }, { time: '18:05:00', text: '<b>second</b>' }]);
+  assert.ok(h.indexOf('second') < h.indexOf('first'));
+  assert.ok(h.includes('&lt;b&gt;second'));
+});
