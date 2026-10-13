@@ -41,7 +41,7 @@ def _title(key, rows, titles, jobs):
                 if episode_key(f['name']) and not SAMPLE.search(f['name'])]
     kind = info.get('type') or ('series' if episodes else 'movie')
     t = {'key': key, 'title': info.get('name') or rows[0]['name'], 'kind': kind if episodes or kind == 'movie' else 'movie',
-         'year': info.get('year'), 'poster': info.get('poster'), 'backdrop': meta.get('background'),
+         'year': str(info['year']) if info.get('year') else None, 'poster': info.get('poster'), 'backdrop': meta.get('background'),
          'bytes': sum(r['bytes'] for r in rows), 'last_used': max(r['last_used'] for r in rows),
          'in_use': any(r['in_use'] for r in rows), 'ihs': [r['ih'] for r in rows], 'episodes': [], 'seasons': [], 'releases': []}
     if t['kind'] == 'series':

@@ -113,6 +113,12 @@ class Library(unittest.TestCase):
         self.assertEqual(t['seasons'], [1, 2])
         self.assertEqual([e['label'] for e in t['episodes'] if e['next']], ['S02E01'])
 
+    def test_a_year_recorded_as_a_number(self):
+        titles = dict(TITLES, **{PACK: dict(TITLES[PACK], year=2019), BEN: dict(TITLES[BEN], year=2026)})
+        _, details = pm.library(rows(), titles, [])
+        self.assertEqual(details['tt7366338']['meta_line'], '2019 · Accid · 3.8 GB here')
+        self.assertEqual(details['tt37287335']['meta_line'], '2026 · Movie · 2 releases · 2.8 GB here')
+
     def test_two_copies_of_one_episode_carry_their_release(self):
         a, b = rows()[0], dict(rows()[0], ih='e' * 40, name='Chernobyl.S01.1080p.WEB-DL.DDP5.1-NTb', last_used=10.0,
                                 videos=[video(0, 'Chernobyl.S01E03.1080p.WEB-DL.DDP5.1-NTb.mkv', 2.0, 1.0)])
