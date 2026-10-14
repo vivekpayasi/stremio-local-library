@@ -139,5 +139,18 @@ class DiskLow(unittest.TestCase):
                 self.assertFalse(ts.Engine.disk_low(engine))
 
 
+class ForLog(unittest.TestCase):
+    def test_the_account_key_is_hidden(self):
+        self.assertEqual(ts.for_log('/get-https?authKey=vPaL-Ms%3D&ipAddress=192.168.0.101'),
+                         '/get-https?authKey=…&ipAddress=192.168.0.101')
+
+    def test_any_key_or_token_is_hidden(self):
+        self.assertEqual(ts.for_log('/x?a=1&api_key=s3cret&Token=t0k'), '/x?a=1&api_key=…&Token=…')
+
+    def test_a_torrent_path_is_untouched(self):
+        p = '/' + 'a' * 40 + '/0?tr=udp%3A%2F%2Ftracker.example%3A1337'
+        self.assertEqual(ts.for_log(p), p)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -130,6 +130,14 @@ def log(*a):
         print(line, flush=True)
 
 
+SECRET_PARAM = re.compile(r'([?&][^=&\s]*(?:key|token)[^=&\s]*=)[^&\s]*', re.I)
+
+
+def for_log(path):
+    """A request path as torrent.log may keep it: the TV's /get-https carries the account's authKey."""
+    return SECRET_PARAM.sub(r'\1…', path)
+
+
 def human(n):
     return f'{n / MB:.1f}MB' if n < 1024 * MB else f'{n / 1024 / MB:.2f}GB'
 
@@ -1097,7 +1105,7 @@ class Handler(BaseHTTPRequestHandler):
         # Every request from another device (the TV), so a client problem shows up in torrent.log. The
         # dashboard's own polling (from a phone) would drown it out.
         if not self.client_address[0].startswith(('127.', '::1')) and not self.path.startswith('/ui/api/'):
-            log(f'{self.client_address[0]} {self.command} {self.path[:160]} -> {code}')
+            log(f'{self.client_address[0]} {self.command} {for_log(self.path)[:160]} -> {code}')
 
     def end_headers(self):
         super().end_headers()
@@ -1176,7 +1184,7 @@ class Handler(BaseHTTPRequestHandler):
         except OSError:
             self.close_connection = True        # the client went away (broken pipe, reset, TLS, timeout)
         except Exception as e:
-            log(f'{self.command} {self.path} failed: {type(e).__name__}: {e}\n' + traceback.format_exc().rstrip())
+            log(f'{self.command} {for_log(self.path)} failed: {type(e).__name__}: {e}\n' + traceback.format_exc().rstrip())
             self.close_connection = True
             if not self.headers_sent:           # otherwise an error page would land inside the body
                 try:
