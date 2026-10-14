@@ -1,6 +1,7 @@
 """Run with:  python3 -m unittest discover -s tests
 
 The dashboard page's model, from fixtures shaped like the real cache (the Accid Chernobyl pack, two Obsession releases)."""
+import os
 import sys
 import time
 import unittest
@@ -320,6 +321,85 @@ class Glance(unittest.TestCase):
         self.assertEqual((r['live'], r['unit'], len(r['history']), r['events'][0]['kind']), (True, 's', 1, 'seek'))
         self.assertEqual(pm.recent(summary(ahead_s=None))['unit'], 'MB')
         self.assertIsNone(pm.recent(None))
+
+
+CERT = {'not_before': 1790339571, 'not_after': 1798115570, 'stremio_at': 1791974136, 'renewal': None}   # 25 Sep – 24 Dec 2026
+OCT_14, DEC_1, DEC_15, DEC_25 = 1791979200, 1796126400, 1797336000, 1798200000                       # noon, UTC
+
+
+def checked(result, at, message=None):
+    return dict(CERT, renewal={'at': at, 'result': result, 'message': message})
+
+
+class Certificate(unittest.TestCase):
+    """Dates as the Mac's clock shows them: the tests run in UTC."""
+    @classmethod
+    def setUpClass(cls):
+        cls.tz = os.environ.get('TZ')
+        os.environ['TZ'] = 'UTC'
+        time.tzset()
+
+    @classmethod
+    def tearDownClass(cls):
+        if cls.tz is None:
+            os.environ.pop('TZ', None)
+        else:
+            os.environ['TZ'] = cls.tz
+        time.tzset()
+
+    def test_months_ahead_it_says_when_renewal_checks_start(self):
+        c = pm.certificate(CERT, OCT_14)
+        self.assertEqual((c['level'], c['reason']), ('good', None))
+        self.assertEqual(c['text'], 'HTTPS certificate issued 25 Sep, valid until 24 Dec (71 days left) · renewal checks start 24 Nov'
+                                    ' · Stremio last opened on this Mac 14 Oct, 10:35')
+
+    def test_in_the_last_month_it_says_what_the_last_check_found(self):
+        c = pm.certificate(checked('same', DEC_1), DEC_1)
+        self.assertEqual(c['level'], 'good')
+        self.assertIn('valid until 24 Dec (23 days left) · last checked 1 Dec: Stremio hasn\'t issued a new one yet', c['text'])
+        self.assertIn('valid until 24 Dec (23 days left) · checking daily for a new one', pm.certificate(CERT, DEC_1)['text'])
+
+    def test_a_check_from_before_the_last_month_is_history(self):
+        old = pm.certificate(checked('failed', 1788264000, 'Stremio\'s API: HTTP 502'), OCT_14)
+        self.assertIn('renewal checks start 24 Nov', old['text'])
+        self.assertNotIn('502', old['text'])
+
+    def test_two_weeks_before_the_expiry_it_is_a_problem_with_what_to_do(self):
+        c = pm.certificate(checked('signed-out', 1797325200, 'Stremio desktop is signed out'), DEC_15)
+        self.assertEqual((c['level'], c['reason']), ('warn', 'The HTTPS certificate expires in 9 days'))
+        self.assertEqual(c['advice'], 'Sign in to Stremio desktop on this Mac; the certificate is then renewed by itself.')
+        self.assertIn('last check failed: Stremio desktop is signed out', c['text'])
+        late = pm.certificate(checked('same', 1797325200), DEC_15)
+        self.assertEqual((late['level'], late['advice']),
+                         ('warn', 'Stremio hasn\'t issued a new one yet; it is asked again every day.'))
+
+    def test_expired_the_tv_cant_connect(self):
+        c = pm.certificate(checked('failed', DEC_25 - 3600, 'Stremio\'s API: HTTP 502'), DEC_25)
+        self.assertEqual((c['level'], c['reason']), ('bad', 'The HTTPS certificate expired on 24 Dec'))
+        self.assertEqual(c['advice'], 'The TV can\'t connect to this Mac until it is renewed. The last try failed '
+                                      '(Stremio\'s API: HTTP 502); it is tried again every day.')
+        self.assertTrue(c['text'].startswith('HTTPS certificate expired on 24 Dec · last check failed: Stremio\'s API: HTTP 502'))
+
+    def test_another_year_is_named_and_a_missing_launch_left_out(self):
+        renewed = {'not_before': 1795593600, 'not_after': 1803369600, 'stremio_at': None, 'renewal': None}
+        self.assertEqual(pm.certificate(renewed, 1795694400)['text'],
+                         'HTTPS certificate issued 25 Nov, valid until 23 Feb 2027 (88 days left) · renewal checks start 24 Jan 2027')
+        self.assertIn('(1 day left)', pm.certificate(CERT, 1798115570 - 86400 - 60)['text'])
+
+    def test_no_certificate(self):
+        self.assertEqual(pm.certificate(None, OCT_14)['level'], 'idle')
+
+    def test_this_mac_shows_it_and_a_problem_with_it(self):
+        good = pm.mac_step(SERVER, CACHE, LIB, 3 * GB, cert=pm.certificate(CERT, OCT_14))
+        self.assertEqual(good['level'], 'good')
+        self.assertIn(['HTTPS certificate', 'valid until 24 Dec (71 days left)'], good['details'])
+        soon = pm.certificate(checked('signed-out', 1797325200, 'Stremio desktop is signed out'), DEC_15)
+        warn = pm.mac_step(SERVER, CACHE, LIB, 3 * GB, cert=soon)
+        self.assertEqual((warn['level'], warn['reason'], warn['advice']), ('warn', soon['reason'], soon['advice']))
+        self.assertEqual(pm.problem([warn])['title'], 'The HTTPS certificate expires in 9 days')
+        self.assertIn('Library', pm.mac_step(SERVER, CACHE, None, 3 * GB, cert=soon)['reason'], 'a service down comes first')
+        gone = pm.mac_step(SERVER, CACHE, None, 3 * GB, cert=pm.certificate(CERT, DEC_25))
+        self.assertEqual((gone['level'], gone['reason']), ('bad', 'The HTTPS certificate expired on 24 Dec'))
 
 
 if __name__ == '__main__':

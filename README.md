@@ -53,6 +53,15 @@ is upgraded. Every write is preceded by a backup in `~/.stremio-local-addon/coll
 and your other addons are never modified. To leave the order alone, pass `pinAfter: null` to
 `startAutoHeal` in `addon.mjs`.
 
+### The certificate, with Stremio closed
+
+The certificate lasts 90 days, and Stremio only fetches a new one when it is opened, or once the old
+one has already expired. So the addon renews it as well: from 30 days before the expiry it asks
+Stremio's API once a day — the same request Stremio makes — and saves the answer to Stremio's own
+`httpsCert.json` only when it is a valid certificate for your install that lasts longer. Stremio
+desktop can stay closed for months. Each check is a `cert renewal:` line in `addon.log`; the
+dashboard shows the certificate's dates at the foot of the page.
+
 ## Requirements
 
 - macOS
@@ -223,6 +232,8 @@ Settings in `advisor.json`:
   Advisor and your Stremio account), the Wi-Fi, the TV — each step with its health and, on tap, its details. When something is
   wrong, the weak step says why.
 - **Recent** seeks and stalls with their cause, the buffer's history, and the server log at the bottom.
+- At the foot: how long the HTTPS certificate lasts, its renewal, and when Stremio was last opened on the Mac. Two weeks
+  before it expires without a new one, it goes to the top of the page with what to do.
 
 The page works on a phone: it shows what is being watched, so by default only this Mac can open it. To open
 it from other devices on your network, add `"dashboard_lan": true` to `~/.stremio-local-addon/torrentd.json` and restart
@@ -358,7 +369,8 @@ app so it re-syncs your addon collection.
 
 The self-healing feature reads your Stremio `authKey` from the desktop app's local storage on
 demand — it is never copied or written to disk — and uses it only against `api.strem.io` to keep
-the addons' URLs current and, once, to find your Torrentio for the Stream Advisor. Your Torrentio
+the addons' URLs current, to renew the HTTPS certificate and, once, to find your Torrentio for the
+Stream Advisor. Request logs hide it, and any other key or token in a URL. Your Torrentio
 URL can contain a debrid key, so `advisor.json` is readable only by you and logs show only its
 host. The full addon collection is backed up to `~/.stremio-local-addon/collection-backups/` before
 every change. The uninstaller removes both addons and, if you had removed Torrentio, puts it back.

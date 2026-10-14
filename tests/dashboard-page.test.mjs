@@ -257,3 +257,16 @@ test('the chain marks each step with the reserved symbols, never colour alone', 
   const marks = [...ctx.chainHTML(steps).matchAll(/class="dot dot-(\w+)"[^>]*>([^<]*)</g)].map((m) => [m[1], m[2]]);
   assert.deepEqual(marks, [['bad', '■'], ['good', '●'], ['warn', '▲'], ['idle', '○']]);
 });
+
+test('the foot of the page: the HTTPS certificate with its mark, once read', () => {
+  const { ctx, els } = page();
+  const text = 'HTTPS certificate issued 25 Sep, valid until 24 Dec (71 days left) · renewal checks start 24 Nov';
+  ctx.render({ ...STATE, certificate: { level: 'good', text } });
+  assert.ok(els.foot.innerHTML.includes(text));
+  assert.match(els.foot.innerHTML, /class="lv-good"[^>]*>●</);
+  ctx.render({ ...STATE, certificate: { level: 'warn', text: 'last check failed: <b>HTTP 502</b>' } });
+  assert.match(els.foot.innerHTML, /class="lv-warn"[^>]*>▲</);
+  assert.ok(els.foot.innerHTML.includes('&lt;b&gt;HTTP 502'), 'escaped');
+  ctx.render({ ...STATE, certificate: null });
+  assert.equal(els.foot.innerHTML, '');
+});

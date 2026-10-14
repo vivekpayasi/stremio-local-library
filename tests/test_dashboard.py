@@ -9,7 +9,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'src'))
 
-from dashboard import (Dashboard, account_status, bdecode, bencode, cache_entries, cached_progress,  # noqa: E402
+from dashboard import (Dashboard, account_status, bdecode, bencode, cache_entries, cached_progress, cert_facts,  # noqa: E402
                        classify_requests, clear_cache, delete_file_cached,
                        delete_cached, resume_progress, filter_log, health, last_tv_ip, next_episode, parse_mac_wifi, parse_ping, parse_tv_snapshot,
                        piece_strip, summarize_session, title_for, ui_allowed, ui_write_allowed)
@@ -310,6 +310,44 @@ class Account(unittest.TestCase):
         self.assertFalse(failed['ok'])
         self.assertIn('HTTP 502', failed['text'])
         self.assertIsNone(account_status(None))
+
+
+class Certificate(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.TemporaryDirectory()
+        d = Path(self.tmp.name)
+        self.cert, self.settings, self.status = d / 'httpsCert.json', d / 'server-settings.json', d / 'cert-renewal.json'
+        self.cert.write_text('{"domain": "192-168-0-101.abc.stremio.rocks", "key": "-----BEGIN PRIVATE KEY-----", "cert": "C", '
+                             '"notBefore": "2026-09-25T12:32:51Z", "notAfter": "2026-12-24T12:32:50Z"}')
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_its_dates_when_stremio_last_started_and_the_last_renewal_check(self):
+        import os
+        self.settings.write_text('{}')
+        os.utime(self.settings, (1791974136, 1791974136))
+        self.status.write_text('{"at": "2026-12-01T12:00:00.000Z", "result": "failed", "message": "Stremio\'s API: HTTP 502"}')
+        self.assertEqual(cert_facts(self.cert, self.settings, self.status),
+                         {'not_before': 1790339571, 'not_after': 1798115570, 'stremio_at': 1791974136,
+                          'renewal': {'at': 1796126400, 'result': 'failed', 'message': "Stremio's API: HTTP 502"}})
+
+    def test_what_is_missing_is_left_out(self):
+        c = cert_facts(self.cert, self.settings, self.status)
+        self.assertEqual((c['not_after'], c['stremio_at'], c['renewal']), (1798115570, None, None))
+        self.assertIsNone(cert_facts(self.cert.with_name('none.json'), self.settings, self.status))
+
+    def test_the_page_gets_it_once_read(self):
+        d = Dashboard(sessions=lambda: [], facts=lambda k: None, install_dir=self.tmp.name, log=lambda *a: None,
+                      config={'cache_dir': self.tmp.name, 'cache_budget_gb': 15, 'cert_file': str(self.cert)})
+        self.assertIsNone(d.state()['certificate'], 'not read yet')
+        d._cert()
+        d.read.add('cert')
+        state = d.state()
+        self.assertTrue(state['certificate']['text'].startswith('HTTPS certificate '))
+        mac = next(s for s in state['chain'] if s['id'] == 'mac')
+        self.assertIn('HTTPS certificate', [k for k, _ in mac['details']])
 
 
 class Titles(unittest.TestCase):

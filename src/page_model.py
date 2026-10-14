@@ -199,9 +199,71 @@ def swarm_step(live, jobs):
     return _step('swarm', 'Swarm', 'idle', 'Nothing streaming right now')
 
 
-def mac_step(server, cache, library, min_free, checked=True):
+DAY = 86400
+RENEW_WINDOW = 30 * DAY   # cert.mjs asks Stremio's API for a new certificate daily from this long before the expiry
+CERT_WARN_DAYS = 14
+
+
+def _date(t, now):
+    """'24 Dec', or '23 Feb 2027' outside this year."""
+    lt = time.localtime(t)
+    out = f'{lt.tm_mday} {time.strftime("%b", lt)}'
+    return out if lt.tm_year == time.localtime(now).tm_year else f'{out} {lt.tm_year}'
+
+
+def _days(n):
+    return f'{n} day' + ('' if n == 1 else 's')
+
+
+def certificate(c, now):
+    """Stremio's HTTPS certificate, for the line at the foot of the page and the This Mac step: how long it lasts, what
+    the last renewal check found, when Stremio last ran here. Two weeks before the expiry without a new one, a problem.
+    `c`: dashboard.cert_facts."""
+    if not c:
+        return {'level': 'idle', 'text': 'No HTTPS certificate yet: open Stremio on this Mac once', 'valid': None,
+                'reason': None, 'advice': None}
+    left = c['not_after'] - now
+    days = int(left // DAY)
+    until = _date(c['not_after'], now)
+    valid = f'expired on {until}' if left <= 0 else f'valid until {until} ({_days(days)} left)'
+    start = c['not_after'] - RENEW_WINDOW
+    r = c.get('renewal')
+    r = r if r and r['at'] >= start else None    # a check from an earlier certificate's last month is history
+    failed = r and r['result'] in ('failed', 'signed-out')
+    if now < start:
+        check = f'renewal checks start {_date(start, now)}'
+    elif failed:
+        check = f'last check failed: {r["message"]}'
+    elif r and r['result'] == 'same':
+        check = f'last checked {_date(r["at"], now)}: Stremio hasn\'t issued a new one yet'
+    else:
+        check = 'checking daily for a new one'
+    parts = [f'HTTPS certificate {valid}' if left <= 0 else f'HTTPS certificate issued {_date(c["not_before"], now)}, {valid}', check]
+    if c.get('stremio_at'):
+        parts.append(f'Stremio last opened on this Mac {_date(c["stremio_at"], now)}, '
+                     + time.strftime('%H:%M', time.localtime(c['stremio_at'])))
+    level, reason, advice = 'good', None, None
+    if left <= 0 or days <= CERT_WARN_DAYS:
+        if r and r['result'] == 'signed-out':
+            advice = 'Sign in to Stremio desktop on this Mac; the certificate is then renewed by itself.'
+        elif failed:
+            advice = f'The last try failed ({r["message"]}); it is tried again every day.'
+        elif r and r['result'] == 'same':
+            advice = 'Stremio hasn\'t issued a new one yet; it is asked again every day.'
+        else:
+            advice = 'The Local Library addon checks for a new one every day.'
+        if left <= 0:
+            level, reason = 'bad', f'The HTTPS certificate expired on {until}'
+            advice = 'The TV can\'t connect to this Mac until it is renewed. ' + advice
+        else:
+            level, reason = 'warn', 'The HTTPS certificate ' + (f'expires in {_days(days)}' if days else 'expires today')
+    return {'level': level, 'text': ' · '.join(parts), 'valid': valid, 'reason': reason, 'advice': advice}
+
+
+def mac_step(server, cache, library, min_free, checked=True, cert=None):
     """This Mac: the torrent server, the cache and the disk, and the services running here. `checked`: whether the
-    library has been asked yet — until then (the first seconds after a start) no answer is not a problem."""
+    library has been asked yet — until then (the first seconds after a start) no answer is not a problem. `cert`:
+    certificate()'s view of Stremio's HTTPS certificate."""
     lib = library or {}
     adv, acct = lib.get('advisor'), lib.get('account')
     down = 'bad' if checked else 'idle'
@@ -220,19 +282,26 @@ def mac_step(server, cache, library, min_free, checked=True):
     used, budget, free = cache.get('used') or 0, cache.get('budget') or 0, cache.get('free')
     line = f"up {spoken(server.get('uptime_s') or 0)} · cache {size(used)} of {size(budget)}" + (f' · {size(free)} free' if free is not None else '')
     reason = advice = None
-    if not library and checked:
+    expired = cert and cert['level'] == 'bad'
+    if expired:
+        reason, advice = cert['reason'], cert['advice']
+    elif not library and checked:
         reason = 'The Local Library addon isn\'t answering'
         advice = 'Local files aren\'t served and streams aren\'t rated until it\'s back; it restarts by itself.'
+    elif cert and cert['reason']:
+        reason, advice = cert['reason'], cert['advice']
     elif acct and not acct['ok']:
         reason = acct['text']
         advice = 'Sign in to Stremio desktop on this Mac.' if 'signed out' in acct['text'] else None
     elif free is not None and free < min_free:
         reason, advice = f'Only {size(free)} free on the disk', 'Delete downloads you\'ve watched to make room.'
-    level = 'warn' if reason else 'good'
+    level = 'bad' if expired else 'warn' if reason else 'good'
     cap = server.get('download_cap_mbps')
     details = [('Running for', spoken(server.get('uptime_s') or 0)), ('Download limit', f'{cap} Mbps' if cap else 'none'),
                ('Torrent cache', f'{size(used)} of {size(budget)}'), ('Free disk', size(free) if free is not None else '—'),
                ('Learning from plays', 'on' if server.get('learning') else 'off')]
+    if cert and cert['valid']:
+        details.append(('HTTPS certificate', cert['valid']))
     return _step('mac', 'This Mac', level, line, reason, advice, details, services)
 
 

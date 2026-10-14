@@ -15,6 +15,7 @@ import threading
 import time
 import urllib.request
 from collections import deque
+from datetime import datetime
 from pathlib import Path
 
 from media_text import EPISODE, SAMPLE, VIDEO, clock, episode_key, episode_label, next_episode  # noqa: F401 (re-exported for tests)
@@ -412,6 +413,31 @@ def account_status(line):
     return {'text': f'The last account update failed: {why}', 'ok': False, 'at': at}
 
 
+def _iso(s):
+    """'2026-12-24T12:32:50Z' (with or without milliseconds) as a time.time() value."""
+    return datetime.fromisoformat(s.replace('Z', '+00:00')).timestamp()
+
+
+def cert_facts(cert_file, settings_file, status_file):
+    """Stremio's HTTPS certificate for the page: its dates (never its key), when Stremio's server last started (it
+    rewrites its settings file then) and the addon's last renewal check (cert.mjs), or None without a certificate."""
+    try:
+        c = json.loads(Path(cert_file).read_text())
+        out = {'not_before': _iso(c['notBefore']), 'not_after': _iso(c['notAfter']), 'stremio_at': None, 'renewal': None}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None
+    try:
+        out['stremio_at'] = os.stat(settings_file).st_mtime
+    except OSError:
+        pass
+    try:
+        r = json.loads(Path(status_file).read_text())
+        out['renewal'] = {'at': _iso(r['at']), 'result': r['result'], 'message': r.get('message')}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        pass
+    return out
+
+
 def last_tv_ip(log_text, own):
     """The last device in torrent.log that polled the server the way a Stremio client does (its status checks
     or a stream's stats), other than this Mac — the TV, even before it has talked to a freshly started server."""
@@ -641,7 +667,7 @@ class Dashboard:
         self.started = started or time.time()
         self.last_poll = 0.0
         self.slow = {'mac_wifi': None, 'tv_ping': None, 'tv': None, 'library': None, 'advisor': None,
-                     'process': None, 'cache': None, 'autoheal': None}
+                     'process': None, 'cache': None, 'autoheal': None, 'cert': None}
         self.history = {}      # ih:idx -> deque of (time, ahead_s, download_mbps, ahead_mb)
         self.pings = deque(maxlen=720)   # (time, ms) of answered pings to the TV, an hour's worth: the "usually" figure
         self.read = set()      # the slow readings taken at least once: until then a missing one is "not read yet", not "down"
@@ -663,7 +689,7 @@ class Dashboard:
             now = time.time()
             for name, every, fn in (('process', 5, self._process), ('cache', 20, self._cache),
                                     ('tv_ping', 5, self._ping), ('mac_wifi', 60, self._mac_wifi),
-                                    ('tv', 30, self._tv), ('library', 30, self._library)):
+                                    ('tv', 30, self._tv), ('library', 30, self._library), ('cert', 60, self._cert)):
                 if now >= due.get(name, 0):
                     due[name] = now + every
                     try:
@@ -816,6 +842,10 @@ class Dashboard:
         heal = [l for l in _tail(self.dir / 'addon.log').splitlines() if 'autoheal:' in l]
         self.slow['autoheal'] = heal[-1][:300] if heal else None
 
+    def _cert(self):
+        cert = Path(self.config.get('cert_file') or '')
+        self.slow['cert'] = cert_facts(cert, cert.parent / 'server-settings.json', self.dir / 'cert-renewal.json')
+
     # ---- titles from the advisor
 
     def _titles(self):
@@ -883,9 +913,10 @@ class Dashboard:
         cache = self.slow.get('cache') or {}
         server = {**(self.slow.get('process') or {}), 'uptime_s': round(now - self.started),
                   'download_cap_mbps': self.config.get('download_limit_mbps'), 'learning': self.config.get('learn_from_plays')}
+        cert = page_model.certificate(self.slow.get('cert'), now) if 'cert' in self.read else None
         chain = [page_model.swarm_step(live, jobs),
                  page_model.mac_step(server, cache, self._library_view(), self.config.get('min_free_gb', 3) * 1024 * MB,
-                                     checked='library' in self.read),
+                                     checked='library' in self.read, cert=cert),
                  page_model.wifi_step(self.slow.get('mac_wifi'), self.slow.get('tv_ping'), page_model.usual_ping(self.pings, now),
                                       self.slow.get('tv'), live is not None, checked='mac_wifi' in self.read),
                  page_model.tv_step(self.slow.get('tv'), live, now)]
@@ -913,6 +944,7 @@ class Dashboard:
             'titles': details,
             'chain': chain,
             'recent': page_model.recent(live or (out[0] if out else None)),
+            'certificate': cert,
         }
 
     def _library_view(self):
