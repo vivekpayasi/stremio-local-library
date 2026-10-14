@@ -13,6 +13,7 @@ import crypto from 'node:crypto';
 import os from 'node:os';
 
 import { startAutoHeal } from './autoheal.mjs';
+import { startCertRenewal } from './cert.mjs';
 import { createAdvisor } from './advisor.mjs';
 
 const HOME = os.homedir();
@@ -23,6 +24,7 @@ const CONFIG = {
   // Anything under here is listed exactly as named, with no IMDb/Cinemeta matching.
   otherRoots: [path.join(HOME, 'Media', 'Other')],
   certFile: path.join(HOME, 'Library/Application Support/stremio-server/httpsCert.json'),
+  certStatusFile: path.join(HOME, '.stremio-local-addon/cert-renewal.json'),   // the last renewal check, for the dashboard
   stremioIndex: path.join(HOME, 'Library/Application Support/stremio-server/localFiles'),
   stremioMeta: path.join(HOME, 'Library/Application Support/stremio-server/localFilesMeta'),
   cacheFile: path.join(HOME, '.stremio-local-addon/cache.json'),
@@ -647,7 +649,7 @@ async function main() {
     });
   });
 
-  // Stremio renews the cert roughly every 90 days; pick it up without a restart.
+  // A renewed cert (by Stremio, or by cert.mjs) is picked up without a restart.
   fs.watchFile(CONFIG.certFile, { interval: 60_000 }, () => {
     try {
       const c = readCert();
@@ -670,6 +672,9 @@ async function main() {
         manifest,
         log,
       });
+
+      // Keeps the certificate current while Stremio desktop stays closed.
+      startCertRenewal({ certFile: CONFIG.certFile, statusFile: CONFIG.certStatusFile, log });
 
       // The advisor registers itself once it knows whose streams to rate; it sits right after this addon.
       const startAdvisor = () => advisor.start({

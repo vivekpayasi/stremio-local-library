@@ -17,7 +17,7 @@ const API = 'https://api.strem.io/api';
 const BACKUP_DIR = path.join(HOME, '.stremio-local-addon/collection-backups');
 
 // Prefer the interface actually carrying the default route; fall back to any private IPv4.
-function currentIp() {
+export function currentIp() {
   const ifaces = os.networkInterfaces();
   for (const name of ['en0', 'en1', ...Object.keys(ifaces)]) {
     for (const a of ifaces[name] ?? []) {
