@@ -87,7 +87,11 @@ class FakeEngine:
         self.torrents = {IH: torrent}
         self.short = False
         self.disk_full = False
+        self.disk_asked = []
         self.gets = 0
+        self.prepared = []
+        self.ready = lambda: (True, None)    # what prepare() answers: (ok, message), or None while the torrent is read
+        self.places_ok = {'mac', 'external'}
 
     def get(self, ih):
         self.gets += 1
@@ -103,8 +107,18 @@ class FakeEngine:
     def streams_short(self):
         return self.short
 
-    def disk_low(self):
+    def disk_low(self, ih=None):
+        self.disk_asked.append(ih)
         return self.disk_full
+
+    def prepare(self, ih, idx, place, note=lambda m: None, stop=lambda: False):
+        self.prepared.append((ih, idx, place, self.gets))
+        self.stop = stop
+        note('Moving it to Extreme SSD')
+        return self.ready()
+
+    def place_ok(self, place):
+        return place in self.places_ok
 
     def file_progress(self, ih):
         t = self.torrents.get(ih)
@@ -235,6 +249,69 @@ class Prefetch(unittest.TestCase):
         self.assertEqual(self.t.have, {6}, 'nothing was fetched')
         self.engine.disk_full = False
         self.assertTrue(until(lambda: self.state() == 'done'))
+
+    def test_the_disk_asked_about_is_the_torrents(self):
+        self.engine.disk_full = True
+        self.p.start(IH, 1, 'S01E02')
+        self.assertTrue(until(lambda: self.state() == 'waiting'))
+        self.assertIn(IH, self.engine.disk_asked)
+        self.engine.disk_full = False
+
+    def test_a_download_for_a_place_gets_its_torrent_ready_there_first(self):
+        gate = threading.Event()
+        self.engine.ready = lambda: (gate.wait(2), (True, None))[1]
+        self.p.start(IH, 1, 'S01E02', place='external', where='Extreme SSD')
+        self.assertTrue(until(lambda: self.state() == 'moving'), self.p.jobs())
+        self.assertEqual(self.job()['message'], 'Moving it to Extreme SSD')
+        self.assertEqual(self.p.pinned(), {IH}, 'its torrent is kept from eviction while it moves')
+        self.assertEqual(self.engine.gets, 0, 'the torrent is not in the session while it moves')
+        gate.set()
+        self.assertTrue(until(lambda: self.state() == 'done'), self.p.jobs())
+        self.assertEqual(self.engine.prepared, [(IH, 1, 'external', 0)])
+        self.assertIn('S01E02 is on Extreme SSD', self.lines[-1])
+
+    def test_while_the_tv_reads_the_torrent_it_waits_to_move_it(self):
+        answers = [None, None, (True, None)]
+        self.engine.ready = lambda: answers.pop(0) if len(answers) > 1 else answers[0]
+        self.p.start(IH, 1, 'S01E02', place='external', where='Extreme SSD')
+        self.assertTrue(until(lambda: self.state() == 'done'), self.p.jobs())
+        self.assertEqual(len(self.engine.prepared), 3)
+
+    def test_it_waits_with_a_reason_while_the_torrent_is_read(self):
+        self.engine.ready = lambda: None
+        self.p.start(IH, 1, 'S01E02', place='external', where='Extreme SSD')
+        self.assertTrue(until(lambda: self.state() == 'waiting'))
+        self.assertIn('TV', self.job()['message'])
+        self.assertEqual(self.engine.gets, 0)
+        self.p.cancel(IH, 1)
+
+    def test_a_torrent_that_cant_be_moved_fails_the_download(self):
+        self.engine.ready = lambda: (False, 'Could not copy it there: No space left on device')
+        self.p.start(IH, 1, 'S01E02', place='external', where='Extreme SSD')
+        self.assertTrue(until(lambda: self.state() == 'failed'))
+        self.assertIn('No space', self.job()['message'])
+        self.assertEqual(self.engine.gets, 0)
+
+    def test_cancel_reaches_the_move(self):
+        self.engine.ready = lambda: (until(lambda: self.engine.stop()), (False, 'Stopped'))[1]
+        self.p.start(IH, 1, 'S01E02', place='external', where='Extreme SSD')
+        self.assertTrue(until(lambda: self.state() == 'moving'))
+        self.p.cancel(IH, 1)
+        self.assertTrue(until(lambda: self.engine.stop()), 'the move was told to stop')
+        self.assertTrue(until(lambda: self.job() is None))
+        time.sleep(0.05)
+        self.assertFalse([l for l in self.lines if 'failed' in l], 'a cancelled job is not reported failed')
+
+    def test_a_drive_unplugged_mid_download_ends_it(self):
+        # Asking for the torrent again would start the file over on this Mac.
+        self.t.held = {5}
+        self.p.start(IH, 1, 'S01E02', place='external', where='Extreme SSD')
+        self.assertTrue(until(lambda: (5, 9, True) in self.t.wanted))
+        self.engine.places_ok = {'mac'}
+        self.t.dropping = True                 # the engine lets go of torrents on a drive that went
+        self.assertTrue(until(lambda: self.state() == 'failed'), self.p.jobs())
+        self.assertIn('Extreme SSD', self.job()['message'])
+        self.assertEqual(self.engine.gets, 1)
 
     def test_stop_lets_go_of_the_torrent(self):
         # At shutdown: the engine is about to save and drop every torrent; the job must not hold one back.

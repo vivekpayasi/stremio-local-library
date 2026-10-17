@@ -38,6 +38,7 @@ import libtorrent as lt
 
 from dashboard import PAGE as DASHBOARD_PAGE, Dashboard, cached_progress, last_tv_ip, ui_allowed, ui_write_allowed
 from prefetch import Prefetcher
+from storage import EXTERNAL_DIR, Places, allocate, covers, file_paths, move_folder, resume_progress
 from stream_facts import FFPROBE, FactStore, Prober, ffprobe_runner
 
 HOME = Path.home()
@@ -51,6 +52,11 @@ CONFIG = {
     'cache_dir': str(INSTALL_DIR / 'torrent-cache'),
     'cache_budget_gb': 15,             # inactive torrents beyond this are deleted, oldest first
     'min_free_gb': 3,                  # ... and so is anything inactive while the disk is this full
+    # An external drive for downloads for later, chosen on the dashboard (see storage.py): its mount point, what the
+    # cache keeps on it, and whether downloads for later go there while it's connected ('external') or stay here ('mac').
+    'external_volume': None,
+    'external_budget_gb': 50,
+    'downloads_to': 'external',
     'start_window_mb': 16,             # what a reader asks for before anything ahead of it has arrived
     'urgent_mb': 64,                   # just ahead of a reader: piece deadlines, spaced as below
     'deadline_rate_mbps': 48,          # deadlines assume this speed, so pieces arrive in reading order
@@ -98,6 +104,7 @@ DEFAULT_TRACKERS = [
     'http://tracker.dler.com:6969/announce',
 ]
 PIECE_CACHE_BYTES = 96 * 1024 * 1024    # recently served pieces, per torrent
+MOVE_IDLE_S = 60     # a torrent read this recently isn't moved to another place: the TV may be about to read it again
 
 IH = r'[0-9a-fA-F]{40}'
 # Stremio's own list, plus the Blu-ray/AVCHD and iTunes containers (.m2ts, .mts, .m4v) its loose regex happens to match.
@@ -122,6 +129,14 @@ def layout(ti):
 
 
 LOG_LOCK = threading.Lock()
+
+
+def _used_at(d):
+    """When a cached torrent was last read, by its folder's .last-used (0 if it never was)."""
+    try:
+        return float((Path(d) / '.last-used').read_text())
+    except (OSError, ValueError):
+        return 0.0
 
 
 def log(*a):
@@ -767,7 +782,8 @@ class Torrent:
 
 class Engine:
     def __init__(self):
-        self.cache = Path(CONFIG['cache_dir'])
+        self.places = Places(CONFIG, CONFIG_FILE)
+        self.cache = Path(CONFIG['cache_dir'])   # this Mac's: where a torrent the TV streams is cached, unless it is elsewhere
         self.cache.mkdir(parents=True, exist_ok=True)
         port = CONFIG['listen_port']
         self.ses = lt.session({
@@ -800,16 +816,23 @@ class Engine:
         self.torrents = {}
         self.pinned = lambda: set()   # info hashes eviction must keep: those with a download for later to finish
         self.lock = threading.RLock()
+        self.moving = set()           # info hashes whose folder is being moved to another place, or deleted
+        self.aborts = set()           # ... whose move the TV wants stopped: it asked for the torrent
+        self.moved = threading.Condition(self.lock)
         self.running = True
         self.last_resume_save = time.time()
+        self.places_due = threading.Event()
+        self.places.kick = self.places_due.set
         threading.Thread(target=self._alerts, name='alerts', daemon=True).start()
         threading.Thread(target=self._housekeeping, name='housekeeping', daemon=True).start()
+        threading.Thread(target=self._watch_places, name='places', daemon=True).start()
 
     def get(self, ih, trackers=(), ti=None):
         """The torrent for an info hash, added to the session if needed (from the cache's resume data,
         a .torrent's info `ti`, or a magnet link)."""
         ih = ih.lower()
         with self.lock:
+            self._wait_for_folder(ih)
             t = self.torrents.get(ih)
             if t and t.dropping:
                 t.dropping = False    # wanted again before it left: the pending resume save just won't remove it
@@ -819,7 +842,7 @@ class Engine:
                     t.handle.add_tracker({'url': tr})
                 t.touch()
                 return t
-            d = self.cache / ih
+            d = self.folder(ih)
             d.mkdir(parents=True, exist_ok=True)
             atp, resumed = None, False
             if (d / '.resume').exists():
@@ -852,6 +875,21 @@ class Engine:
     def find(self, ih):
         return self.torrents.get(ih.lower())
 
+    def _wait_for_folder(self, ih):
+        """(Under self.lock.) While a torrent's folder is being moved or deleted, wait — a move is asked to stop, and
+        the torrent is then read from where it was."""
+        while ih in self.moving:
+            self.aborts.add(ih)
+            self.moved.wait()
+
+    def folder(self, ih):
+        """Where a torrent's files are: its folder in whichever place holds it, else a new one on this Mac."""
+        return self.places.locate(ih) or self.cache / ih.lower()
+
+    def place_ok(self, place_dir):
+        p = self.places.at(place_dir)
+        return bool(p and p['available'])
+
     def file_progress(self, ih):
         """[{name, length, done}] for each file of a torrent in the session, live from libtorrent."""
         t = self.torrents.get(ih)
@@ -881,23 +919,120 @@ class Engine:
                     return True
         return False
 
-    def disk_low(self):
-        """Whether the disk is down to the space always kept free. Downloads for later wait until it isn't."""
-        return shutil.disk_usage(self.cache).free < CONFIG['min_free_gb'] * 1024 * MB
+    def disk_low(self, ih=None):
+        """Whether the disk holding a torrent (this Mac's, for one not in the session) is down to the space always kept
+        free. Downloads for later wait until it isn't."""
+        t = self.torrents.get(ih) if ih else None
+        try:
+            return shutil.disk_usage(t.save_path if t else self.cache).free < CONFIG['min_free_gb'] * 1024 * MB
+        except OSError:
+            return True           # its drive went away
+
+    def _leave(self, ih, reason, timeout=10):
+        """Take a torrent nobody is reading out of the session (its state saved): whether it is out."""
+        t = self.torrents.get(ih)
+        if t:
+            if t.live_readers() or self.busy_files(ih):
+                return False
+            self.drop(t, reason)
+            end = time.time() + timeout
+            while ih in self.torrents and time.time() < end:
+                time.sleep(0.1)
+        return ih not in self.torrents
 
     def offline(self, ih, fn, timeout=10):
         """Run fn() with the torrent out of the session and kept out — to edit its saved state on disk. A
         torrent nobody is reading is taken out first (its state saved); one being read is left alone (None)."""
-        t = self.torrents.get(ih)
-        if t:
-            if t.live_readers() or self.busy_files(ih):
-                return None
-            self.drop(t, 'taken out to delete a file from the dashboard')
-            end = time.time() + timeout
-            while ih in self.torrents and time.time() < end:
-                time.sleep(0.1)
+        if not self._leave(ih, 'taken out to delete a file from the dashboard', timeout):
+            return None
         with self.lock:          # get() takes this lock, so the torrent can't come back mid-edit
-            return None if ih in self.torrents else fn()
+            return None if ih in self.torrents or ih in self.moving else fn()
+
+    def prepare(self, ih, idx, place_dir, note=lambda message: None, stop=lambda: False):
+        """Ready a torrent for one of its files to download for later into the place with folder `place_dir`: moved
+        there if it is elsewhere and, on a disk that can't skip empty space, that file then written out to its full
+        length (storage.py). Returns (ok, message), or None to be asked again later: while something reads the torrent
+        or read it moments ago (a move would pull it from under the TV), or when the TV asked for it mid-move — the
+        move stops and the torrent stays where it was. `note` hears of each step that takes a while; stop() is the
+        download for later being cancelled."""
+        self.places.refresh()          # here, off the streaming path: an up-to-date look before anything moves
+        place = self.places.at(place_dir)
+        if not place or not place['available']:
+            return False, f'{place["name"] if place else Path(place_dir).parent.name} isn\'t connected'
+        t = self.torrents.get(ih)
+        src = t.save_path if t else self.folder(ih)
+        at = self.places.place_of(src)
+        here = at is not None and at['dir'] == place['dir']
+        if here and not (src / f'.writing-out-{idx}').exists():     # a write-out the TV cut short is finished below
+            return True, None
+        if time.time() - (t.last_used if t is not None else _used_at(src)) < MOVE_IDLE_S:
+            return None
+        if not self._leave(ih, f'taken out to move it to {place["name"]}' if not here else 'taken out to write a file out'):
+            return None
+        with self.lock:
+            if ih in self.torrents or ih in self.moving:
+                return None
+            self.moving.add(ih)
+        halt = lambda: ih in self.aborts or stop()  # noqa: E731
+        try:
+            d = place['dir'] / ih
+            if here:
+                d = src
+            elif d.is_dir() and covers(d, src):
+                # The drive was away and the TV played the torrent again from here: the copy there has it all already.
+                log(f'torrent {ih[:8]}: keeping the copy on {place["name"]}, which has all this Mac\'s has; deleting this Mac\'s')
+                shutil.rmtree(src, ignore_errors=True)
+            elif d.is_dir() and not covers(src, d):
+                # Each copy holds pieces the other lacks (a download for later there, episodes played here): both stay,
+                # and the download goes on in the copy the torrent plays from.
+                log(f'torrent {ih[:8]}: copies here and on {place["name"]} each hold pieces the other lacks; both stay')
+                return True, None
+            else:
+                log(f'torrent {ih[:8]}: moving it to {place["name"]} for a download for later')
+                note(f'Moving it to {place["name"]}')
+                ok, msg = move_folder(src, place['dir'], stop=halt)
+                if not ok:
+                    if msg == 'Stopped':
+                        log(f'torrent {ih[:8]}: move to {place["name"]} stopped, it stays where it was')
+                        return (False, 'Stopped') if stop() else None
+                    return False, msg
+            self.places.note(ih, place)
+            files, paths = resume_progress(d / '.resume'), file_paths(d)
+            f = paths[idx] if 0 <= idx < len(paths) else None
+            length = files[idx]['length'] if 0 <= idx < len(files) else 0
+            if not place['sparse'] and f is not None and length > 0:
+                mark = d / f'.writing-out-{idx}'      # until it is written out: a write-out cut short is finished next time
+                mark.touch()
+                log(f'torrent {ih[:8]}: writing out {f.name} ({human(length)}) on {place["name"]}, which can\'t skip empty space')
+                note(f'Setting aside {length / 1024 / MB:.1f} GB on {place["name"]}')
+                if not allocate(f, length, stop=halt):
+                    return (False, 'Stopped') if stop() else None
+                mark.unlink(missing_ok=True)
+            return True, None
+        except OSError as e:
+            return False, f'Could not write the file out on {place["name"]}: {e.strerror or e}'
+        finally:
+            with self.lock:
+                self.moving.discard(ih)
+                self.aborts.discard(ih)
+                self.moved.notify_all()
+
+    def _delete_folder(self, d):
+        """Delete a cached torrent's folder, unless the torrent is (back) in the session or being moved — checked under
+        the lock, and get() waits until the folder is gone. Whether it was deleted."""
+        ih = d.name
+        with self.lock:
+            if ih in self.torrents or ih in self.moving:
+                return False
+            self.moving.add(ih)
+        try:
+            shutil.rmtree(d, ignore_errors=True)
+        finally:
+            with self.lock:
+                self.moving.discard(ih)
+                self.aborts.discard(ih)
+                self.moved.notify_all()
+        return True
 
     def dashboard_sessions(self):
         """Snapshots of every file the TV has read in a torrent still in the session."""
@@ -966,11 +1101,11 @@ class Engine:
                     f'({t.ti.num_files()} files, {t.ti.num_pieces()} pieces of {human(t.ti.piece_length())})')
         elif isinstance(a, lt.save_resume_data_alert):
             ih = str(a.handle.info_hash())
+            t = self.torrents.get(ih)
             try:
-                write_atomic(self.cache / ih / '.resume', lt.write_resume_data_buf(a.params))
+                write_atomic((t.save_path if t else self.folder(ih)) / '.resume', lt.write_resume_data_buf(a.params))
             except Exception as e:
                 log(f'torrent {ih[:8]}: could not write resume data: {e}')
-            t = self.torrents.get(ih)
             if t:
                 self._remove(t)        # no-op unless it is dropping
         elif isinstance(a, lt.save_resume_data_failed_alert):
@@ -1016,14 +1151,38 @@ class Engine:
             except Exception as e:
                 log('housekeeping failed:', e)
 
+    def _watch_places(self):
+        """Every 5 s (or when a setting changed), on a thread of its own: look at the places — a drive can block for a
+        while, and streaming must not wait on it — let go of the torrents on a drive that went, and keep the drive
+        within its budget."""
+        while self.running:
+            try:
+                self.places.refresh()
+                self._drop_unreachable()
+                self._evict(drives=True)
+            except Exception as e:
+                log('places failed:', e)
+            self.places_due.wait(5)
+            self.places_due.clear()
+
+    def _drop_unreachable(self):
+        """Let go of the torrents on a drive that was disconnected: played again, they start over on this Mac."""
+        for t in list(self.torrents.values()):
+            if not t.dropping and self.places.place_of(t.save_path) is None:
+                drive = t.save_path.parent.parent.name if t.save_path.parent.name == EXTERNAL_DIR else 'its drive'
+                self.drop(t, f'{drive} was disconnected')
+
     def _recover(self):
         """Retry torrents stopped by a disk error once there is enough free space again."""
         min_free = CONFIG['min_free_gb'] * 1024 * MB
-        free = shutil.disk_usage(self.cache).free
         for t in list(self.torrents.values()):
             stuck = t.error or (t.handle.flags() & lt.torrent_flags.upload_mode)
             if not stuck:
                 continue
+            try:
+                free = shutil.disk_usage(t.save_path).free
+            except OSError:
+                continue          # its drive went away: _drop_unreachable lets go of it
             if free < min_free:
                 if time.time() - getattr(t, 'warned_full', 0) > 300:
                     t.warned_full = time.time()
@@ -1036,11 +1195,49 @@ class Engine:
             log(f'torrent {t.ih[:8]}: resumed after "{t.error or "upload mode"}" ({human(free)} free)')
             t.error = None
 
-    def _evict(self):
-        budget = CONFIG['cache_budget_gb'] * 1024 * MB
+    def _evict(self, drives=False):
+        """Keep each place within its budget: this Mac's from housekeeping, the drive's (and copies in both places)
+        from the places thread, so a slow drive never holds up streaming. Never what is in the session, still
+        downloading for later, or on its way to another place."""
+        keep = set(self.torrents) | self.pinned() | self.moving
+        places = self.places.available()
+        if drives and len(places) > 1:
+            self._dedupe(places, keep)
+        for place in places:
+            if (place['id'] != 'mac') == drives:
+                self._evict_place(place, keep)
+
+    def _dedupe(self, places, keep):
+        """A torrent with a folder in both places (the drive was away, and the TV played it again from this Mac): a
+        copy goes once the one it plays from holds every piece it holds. Copies that each hold pieces the other lacks —
+        a download for later on the drive, other episodes played here — both stay, for the budgets to settle."""
+        try:
+            names = {d.name for d in places[0]['dir'].iterdir() if re.fullmatch(IH, d.name)} - keep
+        except OSError:
+            return
+        for ih in names:
+            copies = self.places.copies(ih)
+            best = self.places.locate(ih)
+            if len(copies) < 2 or best is None:
+                continue
+            for p, d in copies:
+                if d != best and covers(best, d) and self._delete_folder(d):
+                    log(f'cache: deleted {ih[:8]} on {p["name"]}, a copy with nothing the one in '
+                        f'{best.parent.parent.name if best.parent.name == EXTERNAL_DIR else "this Mac"} lacks')
+
+    def _evict_place(self, place, keep):
+        budget = place['budget']
         min_free = CONFIG['min_free_gb'] * 1024 * MB
+        where = '' if place['id'] == 'mac' else f' on {place["name"]}'
         entries = []
-        for d in self.cache.iterdir():
+        try:
+            folders = list(place['dir'].iterdir())
+        except OSError:
+            return
+        for d in folders:
+            if d.name.endswith('.moving') and d.name[:-len('.moving')] not in self.moving:
+                shutil.rmtree(d, ignore_errors=True)      # a move cut short by a restart
+                continue
             if not d.is_dir() or not re.fullmatch(IH, d.name):
                 continue
             try:
@@ -1049,18 +1246,16 @@ class Engine:
                 used = d.stat().st_mtime
             entries.append((used, d))
         sizes = {d: disk_usage(d) for _, d in entries}
-        pinned = self.pinned()
         total = sum(sizes.values())
-        free = shutil.disk_usage(self.cache).free
+        free = shutil.disk_usage(place['dir']).free
         for used, d in sorted(entries):
             if total <= budget and free >= min_free:
                 break
-            if d.name in self.torrents or d.name in pinned:   # never what is in the session or still downloading for later
+            if d.name in keep or not self._delete_folder(d):
                 continue
-            shutil.rmtree(d, ignore_errors=True)
             total -= sizes[d]
             free += sizes[d]
-            log(f'cache: deleted {d.name[:8]} ({human(sizes[d])}, last used '
+            log(f'cache: deleted {d.name[:8]}{where} ({human(sizes[d])}, last used '
                 f'{time.strftime("%b %d %H:%M", time.localtime(used))}) — cache {human(total)}, free {human(free)}')
 
     def health(self):
@@ -1074,6 +1269,9 @@ class Engine:
             'cache': {'dir': str(self.cache), 'bytes': disk_usage(self.cache),
                       'budget': CONFIG['cache_budget_gb'] * 1024 * MB,
                       'free': shutil.disk_usage(self.cache).free},
+            'places': [{'id': p['id'], 'name': p['name'], 'dir': str(p['dir']), 'budget': p['budget'],
+                        'available': p['available'], 'why': p['why'], 'sparse': p['sparse']} for p in self.places.all()],
+            'downloads_to': self.places.destination()['id'],
         }
 
     def shutdown(self):
@@ -1139,7 +1337,8 @@ class Handler(BaseHTTPRequestHandler):
                 if not self.client_address[0].startswith('127.'):
                     return self.send_bytes(403, 'text/plain', b'')
                 return self.send_bytes(200, 'application/json', json.dumps(cached_progress(
-                    CONFIG['cache_dir'], set(self.engine.torrents), self.engine.file_progress)).encode())
+                    [p['dir'] for p in self.engine.places.available()], set(self.engine.torrents),
+                    self.engine.file_progress)).encode())
             m = re.fullmatch(rf'/torrentd/debug/({IH})', path)
             if m:
                 t = self.engine.find(m.group(1))
@@ -1245,7 +1444,7 @@ class Handler(BaseHTTPRequestHandler):
     # ---- dashboard
 
     UI_CHANGES = ('/ui/api/cache/delete', '/ui/api/cache/clear', '/ui/api/cache/delete-file', '/ui/api/prefetch',
-                  '/ui/api/prefetch/cancel')
+                  '/ui/api/prefetch/cancel', '/ui/api/storage')
 
     @staticmethod
     def cert_suffix():
@@ -1265,7 +1464,8 @@ class Handler(BaseHTTPRequestHandler):
         out = {'/ui/api/cache/delete': lambda: d.delete(ih), '/ui/api/cache/clear': d.clear,
                '/ui/api/cache/delete-file': lambda: d.delete_file(ih, idx),
                '/ui/api/prefetch': lambda: d.prefetch(ih, idx),
-               '/ui/api/prefetch/cancel': lambda: d.cancel_prefetch(ih, idx)}[path]()
+               '/ui/api/prefetch/cancel': lambda: d.cancel_prefetch(ih, idx),
+               '/ui/api/storage': lambda: d.configure(body)}[path]()
         return self.send_bytes(200, 'application/json; charset=utf-8', json.dumps(out).encode())
 
     def ui(self, path):
@@ -1681,7 +1881,8 @@ def main():
         facts=lambda key: Handler.prober.store.get(key) if Handler.prober else None,
         config=CONFIG, install_dir=INSTALL_DIR, log=log, phone_url=phone_url,
         in_session=lambda: set(engine.torrents), live_progress=engine.file_progress,
-        busy_files=engine.busy_files, offline=engine.offline, prefetch=prefetcher,
+        busy_files=engine.busy_files, offline=engine.offline, prefetch=prefetcher, places=engine.places,
+        held=lambda: engine.moving | prefetcher.pinned(),
         tv_ip=lambda: Handler.tv_ip or last_tv_ip(_tail_log(), own_ips()))
     servers = []
     plain = PlainServer(('0.0.0.0', CONFIG['http_port']), Handler)
@@ -1697,6 +1898,8 @@ def main():
     log(f'libtorrent {lt.__version__} — listening on '
         + ', '.join(f'{"https" if isinstance(s, TLSServer) else "http"}:{s.server_address[1]}' for s in servers)
         + f'; other routes -> {CONFIG["upstream"]}; cache {CONFIG["cache_dir"]} (budget {CONFIG["cache_budget_gb"]} GB)'
+        + (f'; downloads for later to {ext["name"]} ({"connected" if ext["available"] else ext["why"].lower()}, '
+           f'budget {CONFIG["external_budget_gb"]} GB)' if (ext := engine.places.external()) else '')
         + f'; download cap {CONFIG["download_limit_mbps"] or "none"} Mbps'
         + ('; learning stream facts from plays' if Handler.prober and CONFIG['learn_from_plays'] else ''))
 

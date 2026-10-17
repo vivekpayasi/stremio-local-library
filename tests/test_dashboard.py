@@ -3,6 +3,7 @@
 Command output below follows the real formats (macOS ping and system_profiler, Android dumpsys/top/logcat
 from the TCL TV), with names and addresses replaced.
 """
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -633,6 +634,158 @@ class CachedProgress(unittest.TestCase):
             self.assertEqual(live, {'a' * 40: {'0': 0.5}})
 
 
+class CachedProgressInEachPlace(unittest.TestCase):
+    def test_what_is_on_the_drive_counts_too(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as a, tempfile.TemporaryDirectory() as b:
+            for base, ih in ((a, 'a' * 40), (b, 'b' * 40)):
+                (Path(base) / ih).mkdir()
+                info = {'name': 'Movie.mkv', 'piece length': 4 * MB, 'length': 8 * MB}
+                (Path(base) / ih / '.resume').write_bytes(benc({'info': info, 'pieces': bytes([0b10000000])}))
+            self.assertEqual(cached_progress([a, b], in_session=set()), {'a' * 40: {'0': 0.5}, 'b' * 40: {'0': 0.5}})
+
+
+class Storage(unittest.TestCase):
+    """This Mac's cache, and a drive (a temporary folder counted as mounted) holding downloads for later."""
+    MOVIE = 'a' * 40
+    PACK = 'b' * 40
+
+    def setUp(self):
+        import tempfile
+        from storage import EXTERNAL_DIR, Places
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        self.mac, self.ssd = root / 'cache', root / 'Volumes' / 'Extreme SSD'
+        self.mac.mkdir()
+        self.ssd.mkdir(parents=True)
+        self.ext = self.ssd / EXTERNAL_DIR
+        self.ext.mkdir()
+        self.connected = True
+        self.file = root / 'torrentd.json'
+        self.config = {'cache_dir': str(self.mac), 'cache_budget_gb': 15, 'min_free_gb': 0, 'external_volume': str(self.ssd),
+                       'external_budget_gb': 50, 'downloads_to': 'external'}
+        self.places = Places(self.config, self.file, mounted=lambda v: self.connected and Path(v) == self.ssd,
+                             volumes_root=root / 'Volumes')
+        # A 20 GB movie (one 4 MB piece of it downloaded), and a pack of two 1 GB episodes.
+        self.movie(self.mac)
+        (self.mac / self.PACK).mkdir()
+        info = {'name': 'Show S01', 'piece length': 4 * MB,
+                'files': [{'length': 1024 * MB, 'path': ['Show.S01E01.mkv']}, {'length': 1024 * MB, 'path': ['Show.S01E02.mkv']}]}
+        (self.mac / self.PACK / '.resume').write_bytes(benc({'info': info, 'pieces': b''}))
+        (self.mac / self.PACK / '.last-used').write_text('1000')
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def movie(self, base, pieces=bytes([0b10000000])):
+        (base / self.MOVIE).mkdir(parents=True)
+        info = {'name': 'Movie.2026.2160p.mkv', 'piece length': 4 * MB, 'length': 20 * 1024 * MB}
+        (base / self.MOVIE / '.resume').write_bytes(benc({'info': info, 'pieces': pieces}))
+        (base / self.MOVIE / '.last-used').write_text('1000')      # long ago: not in use
+
+    def dash(self, prefetch=None, held=()):
+        self.places.refresh()        # as the server's places thread does every few seconds
+        return Dashboard(sessions=lambda: [], facts=lambda k: None, install_dir=self.tmp.name, log=lambda *a: None,
+                         config=self.config, places=self.places, prefetch=prefetch, held=lambda: set(held))
+
+    def test_a_movie_too_big_for_this_mac_downloads_to_the_drive(self):
+        p = FakePrefetcher()
+        self.config['cache_budget_gb'] = 15
+        out = self.dash(p).prefetch(self.MOVIE, 0)
+        self.assertTrue(out['ok'], out)
+        self.assertEqual(p.places, [(str(self.ext), 'Extreme SSD')], 'its torrent moves there first')
+
+    def test_the_drives_budget_is_the_one_that_counts(self):
+        self.config['external_budget_gb'] = 10
+        out = self.dash(FakePrefetcher()).prefetch(self.MOVIE, 0)
+        self.assertFalse(out['ok'])
+        self.assertIn('Extreme SSD', out['message'])
+        self.assertIn('Storage', out['message'], 'where the limit is raised')
+
+    def test_with_the_drive_away_downloads_stay_on_this_mac(self):
+        self.connected = False
+        p = FakePrefetcher()
+        out = self.dash(p).prefetch(self.MOVIE, 0)
+        self.assertFalse(out['ok'], "20 GB doesn't fit in this Mac's 15")
+        self.assertIn('this Mac', out['message'])
+        self.config['cache_budget_gb'] = 25
+        self.assertTrue(self.dash(p).prefetch(self.MOVIE, 0)['ok'])
+        self.assertEqual(p.places, [(str(self.mac), 'This Mac')])
+
+    def test_with_this_mac_chosen_a_torrent_on_the_drive_stays_there(self):
+        import shutil as _sh
+        _sh.move(str(self.mac / self.MOVIE), str(self.ext / self.MOVIE))
+        self.config['downloads_to'] = 'mac'
+        p = FakePrefetcher()
+        self.assertTrue(self.dash(p).prefetch(self.MOVIE, 0)['ok'])
+        self.assertEqual(p.places, [(str(self.ext), 'Extreme SSD')], 'not moved back onto this Mac')
+        self.assertTrue(self.dash(p).prefetch(self.PACK, 1)['ok'])
+        self.assertEqual(p.places[-1], (str(self.mac), 'This Mac'))
+
+    def test_the_shelf_shows_both_places(self):
+        import shutil as _sh
+        _sh.move(str(self.mac / self.MOVIE), str(self.ext / self.MOVIE))
+        d = self.dash()
+        d._cache()
+        state = d.state()
+        places = {p['id']: p for p in state['storage']['places']}
+        self.assertEqual(places['mac']['budget'], 15 * 1024 * MB)
+        self.assertEqual(places['external']['budget'], 50 * 1024 * MB)
+        self.assertTrue(places['external']['available'])
+        self.assertEqual(state['storage']['choice'], 'external')
+        self.assertEqual(state['shelf']['dest']['name'], 'Extreme SSD')
+        rows = {r['ih']: r for r in d.slow['cache_list']}
+        self.assertEqual(rows[self.MOVIE]['place'], 'external')
+        self.assertEqual(rows[self.PACK]['place'], 'mac')
+        self.assertEqual(len(state['shelf']['items']), 2)
+
+    def test_a_copy_in_each_place_is_listed_once(self):
+        self.movie(self.ext, pieces=bytes([0b11000000]))
+        d = self.dash()
+        d._cache()
+        rows = [r for r in d.slow['cache_list'] if r['ih'] == self.MOVIE]
+        self.assertEqual([r['place'] for r in rows], ['external'], 'the copy with more downloaded')
+
+    def test_delete_removes_every_copy(self):
+        self.movie(self.ext)
+        out = self.dash().delete(self.MOVIE)
+        self.assertTrue(out['ok'], out)
+        self.assertFalse((self.mac / self.MOVIE).exists() or (self.ext / self.MOVIE).exists())
+
+    def test_a_torrent_being_moved_or_waiting_to_download_is_not_deleted(self):
+        out = self.dash(held={self.MOVIE}).delete(self.MOVIE)
+        self.assertFalse(out['ok'])
+        self.assertTrue((self.mac / self.MOVIE).exists())
+        self.dash(held={self.MOVIE}).clear()
+        self.assertTrue((self.mac / self.MOVIE).exists())
+        self.assertFalse((self.mac / self.PACK).exists())
+
+    def test_clear_empties_both_places(self):
+        import shutil as _sh
+        _sh.move(str(self.mac / self.MOVIE), str(self.ext / self.MOVIE))
+        out = self.dash().clear()
+        self.assertTrue(out['ok'])
+        self.assertEqual(list(self.ext.iterdir()) + list(self.mac.iterdir()), [])
+
+    def test_a_drive_just_chosen_shows_as_soon_as_it_has_been_looked_at(self):
+        self.config['external_volume'] = None
+        d = self.dash()
+        d._cache()
+        self.assertTrue(d.configure({'downloads_to': 'external', 'volume': str(self.ssd)})['ok'])
+        self.places.refresh()                       # the places thread, kicked by the change
+        places = {p['id']: p for p in d.state()['storage']['places']}
+        self.assertTrue(places['external']['available'], places['external'])
+
+    def test_storage_settings_are_changed_from_the_dashboard(self):
+        d = self.dash()
+        out = d.configure({'place': 'mac', 'budget_gb': 30})
+        self.assertTrue(out['ok'], out)
+        self.assertEqual(self.config['cache_budget_gb'], 30)
+        self.assertEqual(json.loads(self.file.read_text()), {'cache_budget_gb': 30})
+        self.assertEqual({p['id']: p['budget'] for p in d.state()['storage']['places']}['mac'], 30 * 1024 * MB)
+        self.assertFalse(d.configure({'place': 'mac', 'budget_gb': 'lots'})['ok'])
+
+
 class NextEpisode(unittest.TestCase):
     # The Accid Chernobyl pack as libtorrent lists it: the file indexes are not in episode order.
     PACK = [{'idx': 0, 'name': 'Chernobyl - S01E02 - Please Remain Calm (2160p DV HDR x265) [Accid].mkv', 'length': 7496392621, 'done': 1.0},
@@ -691,8 +844,9 @@ class FakePrefetcher:
     def __init__(self, jobs=()):
         self.started, self.cancelled, self.listed = [], [], list(jobs)
 
-    def start(self, ih, idx, label=None):
+    def start(self, ih, idx, label=None, place=None, where=None):
         self.started.append((ih, idx, label))
+        self.places = getattr(self, 'places', []) + [(place, where)]
         return True, f'Downloading {label} for later'
 
     def cancel(self, ih, idx):

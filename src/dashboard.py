@@ -14,13 +14,14 @@ import subprocess
 import threading
 import time
 import urllib.request
-from collections import deque
+from collections import Counter, deque
 from datetime import datetime
 from pathlib import Path
 
 from media_text import EPISODE, SAMPLE, VIDEO, clock, episode_key, episode_label, next_episode  # noqa: F401 (re-exported for tests)
 import page_model
 from prefetch import ACTIVE as JOB_ACTIVE
+from storage import Places, bdecode, bencode, file_paths, footprint, resume_progress  # noqa: F401 (bdecode: tests)
 
 MB = 1024 * 1024
 HERE = Path(__file__).resolve().parent
@@ -206,71 +207,17 @@ def _usage(path):
     return total
 
 
-def bdecode(data):
-    """Bencoded bytes (a .torrent, libtorrent resume data) -> Python values; strings stay bytes."""
-    def dec(i):
-        c = data[i:i + 1]
-        if c == b'i':
-            j = data.index(b'e', i)
-            return int(data[i + 1:j]), j + 1
-        if c in (b'l', b'd'):
-            i += 1
-            items = []
-            while data[i:i + 1] != b'e':
-                v, i = dec(i)
-                items.append(v)
-            return (items if c == b'l' else dict(zip(items[::2], items[1::2]))), i + 1
-        j = data.index(b':', i)
-        n = int(data[i:j])
-        return data[j + 1:j + 1 + n], j + 1 + n
-    return dec(0)[0]
-
-
-def bencode(v):
-    """The reverse of bdecode (dictionary keys sorted, as the format requires)."""
-    if isinstance(v, bool):
-        v = int(v)
-    if isinstance(v, int):
-        return b'i%de' % v
-    if isinstance(v, str):
-        v = v.encode()
-    if isinstance(v, bytes):
-        return b'%d:%s' % (len(v), v)
-    if isinstance(v, list):
-        return b'l' + b''.join(bencode(x) for x in v) + b'e'
-    if isinstance(v, dict):
-        items = sorted((k.encode() if isinstance(k, str) else k, x) for k, x in v.items())
-        return b'd' + b''.join(bencode(k) + bencode(x) for k, x in items) + b'e'
-    raise TypeError(f'cannot bencode {type(v).__name__}')
-
-
-def resume_progress(path):
-    """[{name, length, done}] for each file of a cached torrent, from libtorrent's resume data: the torrent's
-    file list and its bitmap of downloaded pieces (one bit per piece, first piece in the high bit)."""
+def _allocated(path):
     try:
-        d = bdecode(Path(path).read_bytes())
-        info, bits, plen = d[b'info'], d.get(b'pieces', b''), d[b'info'][b'piece length']
-    except (OSError, ValueError, KeyError, IndexError, TypeError):
-        return []
-    have = lambda p: p >> 3 < len(bits) and bits[p >> 3] & (0x80 >> (p & 7))  # noqa: E731
-    files = info.get(b'files') or [{b'length': info.get(b'length', 0), b'path': [info.get(b'name', b'')]}]
-    out, offset = [], 0
-    for f in files:
-        length = f[b'length']
-        done = 0
-        if length:
-            for p in range(offset // plen, (offset + length - 1) // plen + 1):
-                if have(p):
-                    done += min((p + 1) * plen, offset + length) - max(p * plen, offset)
-        out.append({'idx': len(out), 'name': f[b'path'][-1].decode(errors='replace'), 'length': length,
-                    'done': round(done / length, 4) if length else 0})
-        offset += length
-    return out
+        return os.lstat(path).st_blocks * 512 if path else 0
+    except OSError:
+        return 0
 
 
-def cache_entries(cache_dir, in_session, titles, live_progress=None, busy_files=None):
-    """Every torrent in the cache, most recently used first: its name, title, size on disk, whether it's in use,
-    and how much of each file that has any data is downloaded (live for a torrent in the session)."""
+def cache_entries(cache_dir, in_session, titles, live_progress=None, busy_files=None, place=None):
+    """Every torrent in a place's cache folder (this Mac's, without `place`), most recently used first: its name, title,
+    size on disk, whether it's in use, and how much of each file that has any data is downloaded (live for a torrent in
+    the session) and takes on disk."""
     rows = []
     try:
         dirs = [d for d in Path(cache_dir).iterdir() if d.is_dir() and IH_DIR.fullmatch(d.name)]
@@ -282,8 +229,12 @@ def cache_entries(cache_dir, in_session, titles, live_progress=None, busy_files=
         t = titles.get(d.name) or {}
         files = (live_progress(d.name) if live_progress and d.name in in_session else None) or resume_progress(d / '.resume')
         busy = busy_files(d.name) if busy_files and d.name in in_session else set()
-        files = [dict(f, idx=f.get('idx', i), busy=f.get('idx', i) in busy) for i, f in enumerate(files)]
+        paths = file_paths(d)
+        files = [dict(f, idx=f.get('idx', i), busy=f.get('idx', i) in busy,
+                      alloc=_allocated(paths[f.get('idx', i)] if f.get('idx', i) < len(paths) else None))
+                 for i, f in enumerate(files)]
         rows.append({'ih': d.name, 'name': names[0] if names else d.name[:8], 'title': t.get('name'),
+                     'place': place['id'] if place else 'mac', 'place_name': place['name'] if place else 'This Mac',
                      'poster': t.get('poster'), 'bytes': _usage(d), 'last_used': used, 'in_use': _in_use(d, in_session),
                      # Videos only (not the .nfo or poster that come along), at least 1% in (not a piece shared
                      # with the neighbouring episode), most complete first.
@@ -295,14 +246,17 @@ def cache_entries(cache_dir, in_session, titles, live_progress=None, busy_files=
     return rows
 
 
-def cached_progress(cache_dir, in_session, live_progress=None):
-    """{info hash: {file index: fraction downloaded}} for every file at least 1% on this Mac — what the advisor
-    shows on the TV's stream cards. Live for torrents in the session, from resume data for the rest."""
+def cached_progress(cache_dirs, in_session, live_progress=None):
+    """{info hash: {file index: fraction downloaded}} for every file at least 1% in the cache folders (one, or a list:
+    this Mac's and the drive's) — what the advisor shows on the TV's stream cards. Live for torrents in the session,
+    from resume data for the rest."""
     out = {}
-    try:
-        dirs = [d for d in Path(cache_dir).iterdir() if d.is_dir() and IH_DIR.fullmatch(d.name)]
-    except OSError:
-        return out
+    dirs = []
+    for c in ([cache_dirs] if isinstance(cache_dirs, (str, os.PathLike)) else cache_dirs):
+        try:
+            dirs += [d for d in Path(c).iterdir() if d.is_dir() and IH_DIR.fullmatch(d.name)]
+        except OSError:
+            pass
     for d in dirs:
         files = (live_progress(d.name) if live_progress and d.name in in_session else None) or resume_progress(d / '.resume')
         got = {str(i): round(f['done'], 4) for i, f in enumerate(files) if f['done'] >= 0.01}
@@ -655,9 +609,13 @@ class Dashboard:
 
     def __init__(self, sessions, facts, config, install_dir, log, tv_ip=lambda: None, started=None,
                  phone_url=lambda: None, in_session=lambda: set(), live_progress=None, busy_files=None, offline=None,
-                 prefetch=None):
+                 prefetch=None, places=None, held=lambda: set()):
         self.sessions, self.facts, self.config, self.log = sessions, facts, config, log
         self.prefetcher = prefetch      # prefetch.Prefetcher: downloads for later
+        self.places = places or Places(config)   # storage.Places: this Mac's cache folder, and the drive's
+        # Torrents the engine works on outside the session — being moved, or with a download for later to come: in use,
+        # like those in the session, so they aren't deleted from under it.
+        self.held = held
         self.in_session, self.live_progress = in_session, live_progress
         self.busy_files = busy_files    # ih -> {file index being read}, for torrents in the session
         self.offline = offline          # (ih, fn) -> fn()'s result with the torrent out of the session, or None if busy
@@ -703,23 +661,56 @@ class Dashboard:
         if len(out) == 2:
             self.slow['process'] = {'cpu': float(out[0]), 'rss_mb': round(int(out[1]) / 1024)}
 
+    def _using(self):
+        return self.in_session() | self.held()
+
     def _cache(self):
-        cache = Path(self.config['cache_dir'])
-        used = 0
-        for root, _, files in os.walk(cache):
-            for f in files:
+        in_session, titles = self._using(), self._titles()
+        views, rows = [], []
+        for p in self.places.all():
+            view = dict({k: p[k] for k in ('id', 'name', 'budget', 'available', 'why')}, dir=str(p['dir']))
+            if p['available']:
                 try:
-                    used += os.lstat(os.path.join(root, f)).st_blocks * 512
+                    view.update(used=_usage(p['dir']), free=shutil.disk_usage(p['dir']).free)
                 except OSError:
-                    pass
-        self.slow['cache'] = {'used': used, 'budget': self.config['cache_budget_gb'] * 1024 * MB,
-                              'free': shutil.disk_usage(cache).free}
-        self.slow['cache_list'] = cache_entries(cache, self.in_session(), self._titles(), self.live_progress, self.busy_files)
+                    view.update(used=0, free=None)
+                rows += cache_entries(p['dir'], in_session, titles, self.live_progress, self.busy_files, place=p)
+            views.append(view)
+        # A torrent with a copy in each place (the drive was away, and the TV played it again here) is listed once:
+        # the copy it plays from. The cache deletes the other.
+        for ih in [ih for ih, n in Counter(r['ih'] for r in rows).items() if n > 1]:
+            found = self.places.locate(ih)
+            at = self.places.place_of(found) if found else None
+            keep = at['id'] if at else next(r['place'] for r in rows if r['ih'] == ih)
+            rows = [r for r in rows if r['ih'] != ih or r['place'] == keep]
+        rows.sort(key=lambda r: r['last_used'], reverse=True)
+        mac = views[0]
+        self.slow['cache'] = {'used': mac.get('used', 0), 'budget': mac['budget'], 'free': mac.get('free'), 'places': views}
+        self.slow['volumes'] = self.places.volumes()
+        self.slow['cache_list'] = rows
+
+    def _folder(self, ih):
+        """A cached torrent's folder, in whichever place holds it (this Mac's, if none does)."""
+        return self.places.locate(ih) or Path(self.config['cache_dir']) / ih
+
+    def configure(self, change):
+        """A change from the Storage panel: a place's budget, or where downloads for later go (storage.Places.configure)."""
+        ok, message = self.places.configure(change)
+        if ok:
+            self.log(f'storage: {message[0].lower() + message[1:]} (from the dashboard)')
+            self._cache()
+        return {'ok': ok, 'message': message}
 
     # ---- changes, from the dashboard's buttons
 
     def delete(self, ih):
-        ok, msg, freed = delete_cached(self.config['cache_dir'], ih, self.in_session())
+        """Delete a torrent from the cache: every copy of it, in each place."""
+        in_session = self._using()
+        results = [delete_cached(p['dir'], ih, in_session) for p, _ in self.places.copies(ih)] \
+            or [delete_cached(self.config['cache_dir'], ih, in_session)]
+        ok = all(r[0] for r in results)
+        msg = next((r[1] for r in results if not r[0]), 'Deleted')
+        freed = sum(r[2] for r in results)
         if ok:
             self.log(f'cache: deleted {ih[:8]} ({freed / MB:.0f} MB) from the dashboard')
         self._cache()
@@ -737,7 +728,7 @@ class Dashboard:
         if busy:
             return no('Another file of this torrent is being read right now. You can delete this one once it stops.')
         run = self.offline or (lambda _ih, fn: fn())
-        result = run(ih, lambda: delete_file_cached(self.config['cache_dir'], ih, idx))
+        result = run(ih, lambda: delete_file_cached(self._folder(ih).parent, ih, idx))
         if not result:
             return no('The torrent is busy. Try again in a minute.')
         ok, msg, freed = result
@@ -747,7 +738,10 @@ class Dashboard:
         return {'ok': ok, 'message': msg, 'freed': freed}
 
     def clear(self):
-        deleted, freed = clear_cache(self.config['cache_dir'], self.in_session())
+        deleted, freed = [], 0
+        for p in self.places.available():
+            d, n = clear_cache(p['dir'], self._using())
+            deleted, freed = deleted + d, freed + n
         if deleted:
             self.log(f'cache: cleared {len(deleted)} torrent(s), {freed / MB:.0f} MB, from the dashboard')
         self._cache()
@@ -756,10 +750,12 @@ class Dashboard:
     def _files(self, ih):
         """[{idx, name, length, done}] for each file of a cached torrent: live while it's in the session."""
         files = self.live_progress(ih) if self.live_progress and ih in self.in_session() else None
-        return files or resume_progress(Path(self.config['cache_dir']) / ih / '.resume')
+        return files or resume_progress(self._folder(ih) / '.resume')
 
     def prefetch(self, ih, idx):
-        """Download one file of a cached torrent for later — the next episode of a season pack — if it fits on disk."""
+        """Download one file of a cached torrent for later — a movie, the next episode of a season pack — if it fits.
+        It goes onto the drive while that is chosen and connected (its torrent moved there first), else it stays in
+        the place that holds its torrent: never back onto this Mac."""
         def no(message):
             return {'ok': False, 'message': message}
         if not self.prefetcher:
@@ -768,8 +764,13 @@ class Dashboard:
         if not f:
             return no('Not a file in the cache')
         label = episode_label(f['name'])
+        src = self._folder(ih)
+        at = self.places.place_of(src) or self.places.mac()
+        dest = self.places.destination()
+        to = dest if dest['id'] == 'external' else at
+        where = lambda p: 'on this Mac' if p['id'] == 'mac' else f'on {p["name"]}'  # noqa: E731
         if f['done'] >= 1:
-            return no(f'{label} is already on this Mac')
+            return no(f'{label} is already {where(at)}')
         def left(files, i):
             return next((g['length'] * (1 - g['done']) for g in files if g['idx'] == i), 0)
         gb = lambda n: f'{n / 1024 / MB:.1f} GB'  # noqa: E731
@@ -779,19 +780,24 @@ class Dashboard:
         files = self._files(ih)
         busy = self.busy_files(ih) if self.busy_files and ih in self.in_session() else set()
         coming = {idx} | busy | {j['idx'] for j in others if j['ih'] == ih}
-        pack = _usage(Path(self.config['cache_dir']) / ih) + sum(left(files, i) for i in coming)
-        budget = self.config['cache_budget_gb'] * 1024 * MB
+        pack = footprint(src, {g['idx']: g['length'] for g in files if g['idx'] in coming}, to['sparse'])
+        budget = to['budget']
         if pack > budget:
-            return no(f'{label} would bring this torrent to {gb(pack)}, past the {gb(budget)} the cache keeps, and the cache '
-                      f'would then delete all of it. Delete the episodes you\'ve watched first.')
-        # The disk: the rest of this file and of every other download still to come.
-        need = left(files, idx) + sum(left(self._files(j['ih']), j['idx']) for j in others)
+            if sum(1 for g in files if VIDEO.search(g['name'])) > 1:
+                return no(f'{label} would bring this torrent to {gb(pack)}, past the {gb(budget)} the cache keeps {where(to)}, '
+                          f'and the cache would then delete all of it. Delete the episodes you\'ve watched first, or raise '
+                          f'the limit under Storage.')
+            return no(f'{label} needs {gb(pack)}, past the {gb(budget)} the cache keeps {where(to)}. Raise the limit under Storage.')
+        # The disk: what this file still needs there (all of the torrent, if it moves there), and every other download
+        # still to come there.
+        need = footprint(src, {idx: f['length']}, to['sparse']) - (_usage(src) if at['id'] == to['id'] else 0)
+        need += sum(left(self._files(j['ih']), j['idx']) for j in others if j.get('place') in (None, str(to['dir'])))
         keep = self.config.get('min_free_gb', 3) * 1024 * MB
-        free = shutil.disk_usage(self.config['cache_dir']).free
+        free = shutil.disk_usage(to['dir']).free
         if need > free - keep:
-            return no(f'Not enough free disk space: {"this and the downloads queued before it need" if others else f"{label} needs"} '
+            return no(f'Not enough free space {where(to)}: {"this and the downloads queued before it need" if others else f"{label} needs"} '
                       f'{gb(need)}, and only {gb(max(0, free - keep))} can be used ({keep / 1024 / MB:.0f} GB is kept free)')
-        ok, message = self.prefetcher.start(ih, idx, label)
+        ok, message = self.prefetcher.start(ih, idx, label, place=str(to['dir']), where=to['name'])
         return {'ok': ok, 'message': message}
 
     def cancel_prefetch(self, ih, idx):
@@ -911,6 +917,7 @@ class Dashboard:
         shelf, details = page_model.library(rows or [], titles, jobs)
         live = next((s for s in out if s['live']), None)
         cache = self.slow.get('cache') or {}
+        storage = self._storage_view(cache)
         server = {**(self.slow.get('process') or {}), 'uptime_s': round(now - self.started),
                   'download_cap_mbps': self.config.get('download_limit_mbps'), 'learning': self.config.get('learn_from_plays')}
         cert = page_model.certificate(self.slow.get('cert'), now) if 'cert' in self.read else None
@@ -938,14 +945,32 @@ class Dashboard:
             'glance': page_model.glance(live, titles) if live else None,
             'idle_text': 'Nothing is playing',
             'up_next': page_model.up_next(out, details, titles, jobs),
+            'storage': storage,
             'shelf': None if rows is None else {
                 'used': cache.get('used'), 'budget': cache.get('budget'), 'free': cache.get('free'), 'items': shelf,
+                'places': storage['places'], 'dest': storage['dest'],
                 'idle_bytes': sum(r['bytes'] for r in rows if not r['in_use']), 'idle_count': sum(1 for r in rows if not r['in_use'])},
             'titles': details,
             'chain': chain,
             'recent': page_model.recent(live or (out[0] if out else None)),
             'certificate': cert,
         }
+
+    def _storage_view(self, cache):
+        """The Storage panel: each place with its budget (and, once read, its use and free space), where downloads
+        for later go, and the drives that could take them instead."""
+        # The places as last looked at (every few seconds); their use and free space from the last reading (every 20 s).
+        read = {p['dir']: p for p in cache.get('places') or []}
+        places = [dict({k: p[k] for k in ('id', 'name', 'budget', 'available', 'why')}, dir=str(p['dir']),
+                       **{k: read[str(p['dir'])][k] for k in ('used', 'free') if k in read.get(str(p['dir']), {})})
+                  for p in self.places.all()]
+        dest = self.places.destination()
+        chosen = self.config.get('external_volume')
+        used = next((p.get('used') for p in places if p['id'] == dest['id']), None)
+        return {'places': places, 'choice': 'external' if chosen and self.config.get('downloads_to', 'external') == 'external' else 'mac',
+                'dest': {'id': dest['id'], 'name': dest['name'], 'budget': dest['budget'], 'used': used},
+                'volumes': [v for v in self.slow.get('volumes') or [] if v['path'] != chosen],
+                'keep': self.config.get('min_free_gb', 3) * 1024 * MB}
 
     def _library_view(self):
         lib, adv = self.slow.get('library'), self.slow.get('advisor')

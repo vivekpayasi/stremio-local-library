@@ -176,6 +176,47 @@ class UpNext(unittest.TestCase):
         self.assertEqual(u['label'], 'S01E04')
 
 
+class OnTheDrive(unittest.TestCase):
+    """Torrents kept on the external drive, beside those on this Mac."""
+    def drive(self, r):
+        return dict(r, place='external', place_name='Extreme SSD')
+
+    def test_the_card_and_sheet_say_where_a_movie_is(self):
+        r = self.drive(dict(rows()[1], videos=[video(0, 'Obsession.2026.2160p.mp4', 21.7, 1.0)], bytes=int(21.7 * GB)))
+        shelf, details = pm.library([r], TITLES, [])
+        self.assertEqual(shelf[0]['summary'], 'Movie · on Extreme SSD · 21.7 GB')
+        self.assertEqual(details['tt37287335']['meta_line'], '2026 · Movie · 21.7 GB on Extreme SSD')
+        self.assertEqual(details['tt37287335']['releases'][0]['place_name'], 'Extreme SSD')
+
+    def test_a_series_on_the_drive(self):
+        shelf, details = pm.library([self.drive(rows()[0])], TITLES, [])
+        self.assertEqual(shelf[0]['summary'], 'S1 · 1 episode on Extreme SSD')
+        self.assertEqual(details['tt7366338']['meta_line'], '2019 · Accid · 3.8 GB on Extreme SSD')
+
+    def test_an_episode_knows_whether_it_comes_in_a_pack(self):
+        _, details = pm.library(rows(), TITLES, [])
+        self.assertEqual({e['pack'] for e in details['tt7366338']['episodes']}, {True})
+        one = dict(rows()[0], videos=[video(0, 'Show.S01E01.mkv', 1, 0.0)])
+        _, details = pm.library([one], TITLES, [])
+        self.assertEqual([e['pack'] for e in details['tt7366338']['episodes']], [False])
+
+    def test_episodes_and_up_next_carry_their_torrents_place(self):
+        _, details = pm.library([self.drive(rows()[0])], TITLES, [])
+        self.assertEqual({e['place'] for e in details['tt7366338']['episodes']}, {'external'})
+        self.assertEqual(pm.up_next([], details, TITLES, [])['place'], 'external')
+
+    def test_releases_in_both_places(self):
+        a, b = rows()[1], self.drive(rows()[2])
+        _, details = pm.library([a, b], TITLES, [])
+        self.assertEqual(details['tt37287335']['meta_line'], '2026 · Movie · 2 releases · 2.8 GB here and on Extreme SSD')
+
+    def test_the_size_of_a_release_once_downloaded(self):
+        # 2.4 GB on disk, of which its video takes 2.3: done, the video takes its 21.7 GB, the rest stays.
+        r = dict(rows()[1], videos=[dict(video(0, 'Obsession.2026.2160p.mp4', 21.7, 0.11), alloc=int(2.3 * GB))])
+        _, details = pm.library([r], TITLES, [])
+        self.assertEqual(details['tt37287335']['releases'][0]['when_done'], int(2.4 * GB) - int(2.3 * GB) + int(21.7 * GB))
+
+
 def live(**over):
     s = {'live': True, 'download_mbps': 31.0, 'bitrate_mbps': 15.0, 'ahead_s': 260, 'complete': False, 'waiting_s': 0,
          'waiting_mid': False, 'peers': {'connected': 38, 'sending': 12, 'seeds': 30}, 'events': [],
@@ -225,6 +266,22 @@ class Chain(unittest.TestCase):
         self.assertEqual((signed_out['level'], signed_out['reason']), ('warn', "Stremio desktop is signed out, so the account can't be updated"))
         full = pm.mac_step(SERVER, dict(CACHE, free=2 * GB), LIB, 3 * GB)
         self.assertEqual((full['level'], full['reason']), ('warn', 'Only 2.0 GB free on the disk'))
+
+    def test_this_mac_shows_the_drive(self):
+        drive = {'id': 'external', 'name': 'Extreme SSD', 'budget': 50 * GB, 'available': True, 'why': None,
+                 'used': 20 * GB, 'free': 65 * GB}
+        mac = {'id': 'mac', 'name': 'This Mac', 'budget': 15 * GB, 'available': True, 'why': None, 'used': int(4.4 * GB), 'free': 22 * GB}
+        m = pm.mac_step(SERVER, dict(CACHE, places=[mac, drive]), LIB, 3 * GB)
+        self.assertIn(['Extreme SSD', '20.0 GB of 50.0 GB · 65.0 GB free'], m['details'])
+        self.assertEqual(m['level'], 'good')
+        away = pm.mac_step(SERVER, dict(CACHE, places=[mac, dict(drive, available=False, why='Not connected')]), LIB, 3 * GB)
+        self.assertIn(['Extreme SSD', 'Not connected'], away['details'])
+        self.assertEqual(away['level'], 'good', 'a drive that is away is not a problem')
+        blocked = pm.mac_step(SERVER, dict(CACHE, places=[mac, dict(drive, available=False,
+                                                                     why="macOS isn't letting the torrent server use it")]), LIB, 3 * GB)
+        self.assertEqual(blocked['level'], 'warn')
+        self.assertIn('Extreme SSD', blocked['reason'])
+        self.assertIn('Privacy & Security', blocked['advice'])
 
     def test_before_the_first_readings_nothing_is_called_down(self):
         m = pm.mac_step({'uptime_s': 5}, CACHE, None, 3 * GB, checked=False)

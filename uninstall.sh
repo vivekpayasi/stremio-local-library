@@ -88,6 +88,20 @@ if [ -n "$PLUGIN_DIR" ] && [ -f "$PLUGIN_DIR/stremio-library.30s.sh" ]; then
   ok "Menu bar icon removed (SwiftBar itself was left installed)"
 fi
 
+# Downloads for later kept on an external drive (chosen on the dashboard), if it's connected.
+DRIVE="$(plutil -extract external_volume raw -o - "$INSTALL_DIR/torrentd.json" 2>/dev/null || true)"
+DRIVE_CACHE="$DRIVE/Stremio Sidecar cache"
+if [ -n "$DRIVE" ] && [ -d "$DRIVE_CACHE" ]; then
+  DRIVE_SIZE="$(du -sh "$DRIVE_CACHE" 2>/dev/null | cut -f1 || true)"
+  read -r -p "Delete the downloads kept on $(basename "$DRIVE") ($DRIVE_CACHE, ${DRIVE_SIZE:-empty})? [y/N] " reply
+  case "$reply" in
+    [yY]*) rm -rf "$DRIVE_CACHE"; ok "Removed $DRIVE_CACHE" ;;
+    *) warn "Kept $DRIVE_CACHE" ;;
+  esac
+elif [ -n "$DRIVE" ]; then
+  warn "$(basename "$DRIVE") isn't connected: delete its \"Stremio Sidecar cache\" folder yourself if you no longer want it"
+fi
+
 if [ -d "$INSTALL_DIR" ]; then
   CACHE_SIZE="$(du -sh "$INSTALL_DIR/torrent-cache" 2>/dev/null | cut -f1 || true)"
   read -r -p "Delete $INSTALL_DIR (logs, backups, torrent cache ${CACHE_SIZE:-empty})? [y/N] " reply

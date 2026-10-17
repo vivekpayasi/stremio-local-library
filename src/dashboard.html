@@ -93,6 +93,8 @@ button.solid, button.ghost { min-height: 40px; padding: 6px 16px; border-radius:
 button.solid { background: var(--ink); color: var(--bg); border: 0; }
 button.ghost { background: none; color: var(--ink-2); border: 1px solid var(--rule); }
 button.ghost:hover { border-color: var(--ink-2); }
+button.ghost:disabled { opacity: .4; cursor: default; } button.ghost:disabled:hover { border-color: var(--rule); }
+button.link { background: none; border: 0; padding: 0 2px; min-height: 40px; color: var(--accent); font-size: inherit; font-weight: 600; cursor: pointer; }
 button.danger { color: var(--bad); } button.danger:hover { border-color: var(--bad); }
 button.wide { width: 100%; margin-top: 12px; }
 .note { font-size: 13px; color: var(--ink-2); margin-top: 8px; }
@@ -108,6 +110,22 @@ button.wide { width: 100%; margin-top: 12px; }
 .sh-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
 .sh-head .muted { margin-left: auto; }
 .shelf-sec .bar.space { margin: 8px 0 14px; }
+.sh-head button.ghost { padding: 4px 14px; font-size: 13px; } .sh-head h2 + button { margin-left: auto; }
+.places { display: grid; gap: 10px; margin: 10px 0 14px; }
+.places li { display: grid; grid-template-columns: 1fr auto; gap: 4px 10px; align-items: baseline; }
+.places .bar { grid-column: 1 / -1; }
+.pl-name { font-size: 13px; font-weight: 650; color: var(--ink-2); }
+/* the Storage panel: where downloads for later go, and what each place keeps */
+.store { background: var(--raise); border-radius: 14px; padding: 12px 14px; margin: 0 0 14px; display: grid; gap: 12px; }
+.st-dest { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 14px; }
+.st-limits { display: grid; gap: 10px; }
+.st-limit { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 0 10px; }
+.st-name { font-weight: 650; font-size: 14px; }
+.st-limit .muted { grid-column: 1; }
+.stepper { grid-column: 2; grid-row: 1 / span 2; display: flex; align-items: center; gap: 6px; }
+.stepper button.ghost { min-width: 40px; padding: 6px 0; }
+.stepper button.solid { padding: 6px 14px; }
+.stepper output { min-width: 4.2em; text-align: center; font-weight: 700; font-variant-numeric: tabular-nums; }
 .shelf { display: flex; gap: 12px; overflow-x: auto; scroll-snap-type: x proximity; padding-bottom: 6px; }
 .tile { display: flex; flex-direction: column; align-items: flex-start; width: 124px; flex: none; background: none; border: 0; padding: 0;
   text-align: left; cursor: pointer; scroll-snap-align: start; border-radius: 10px; }
@@ -207,7 +225,7 @@ details.log { margin-top: 22px; }
       <section class="glance idle" id="glance-wrap" aria-label="Now playing"><div class="bd-wrap" id="glance-bg"></div><div id="glance"></div></section>
       <div class="pair solo" id="pair">
         <section class="cine upnext" id="upnext-wrap" aria-label="Up next" hidden><div class="bd-wrap" id="upnext-bg"></div><div id="upnext"></div></section>
-        <section class="shelf-sec" aria-label="On this Mac"><div id="shelf-head"></div><div id="shelf-tiles"></div><div id="shelf-foot"></div></section>
+        <section class="shelf-sec" aria-label="On this Mac"><div id="shelf-head"></div><div id="shelf-store"></div><div id="shelf-tiles"></div><div id="shelf-foot"></div></section>
       </div>
     </div>
     <aside class="side">
@@ -232,7 +250,8 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '
 const MB = 1024 * 1024;
 const nf = new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 });
 const MARK = { good: '●', warn: '▲', bad: '■', idle: '○' };
-const ACTIVE = ['queued', 'starting', 'downloading', 'waiting'];
+const ACTIVE = ['queued', 'starting', 'moving', 'downloading', 'waiting'];
+const GB = 1024 * MB;
 const lv = (level, text) => `<span class="lv-${level}" aria-hidden="true">${MARK[level] || MARK.idle}</span>${text ? ` ${esc(text)}` : ''}`;
 const pct = (f) => Math.floor((f || 0) * 100);
 const bytes = (b) => b == null ? '—' : b >= 1024 * MB ? `${nf.format(b / 1024 / MB)} GB` : `${Math.round(b / MB)} MB`;
@@ -273,6 +292,7 @@ function jobLine(j) {
   if (!j) return '';
   if (j.state === 'queued') return 'Queued after the current download';
   if (j.state === 'starting') return 'Starting';
+  if (j.state === 'moving') return j.message || 'Moving';
   if (j.state === 'waiting') return j.message || 'Waiting';
   if (j.mbps === 0) return 'Nothing is arriving right now';
   return [`${pct(j.done)}%`, j.mbps != null ? `${nf.format(j.mbps)} Mbps` : null, j.eta_s != null ? `about ${span(j.eta_s)} left` : null,
@@ -340,7 +360,7 @@ function upNextHTML(u) {
     const left = u.length * (1 - u.done);
     const failed = u.state === 'failed' && u.job && u.job.message ? ` · the last try stopped: ${esc(u.job.message)}` : '';
     body = `<p class="muted small">${u.done >= 0.01 ? `${bytes(left)} to go, ${pct(u.done)}% is here` : bytes(u.length)}${failed}</p>
-      <button class="solid" type="button" data-get="${esc(u.ih)}" data-idx="${u.idx}" data-label="${esc(u.label)}" data-left="${Math.round(left)}">${u.done >= 0.01 ? 'Download the rest' : 'Download for later'}</button>`;
+      <button class="solid" type="button" data-get="${esc(u.ih)}" data-idx="${u.idx}" data-label="${esc(u.label)}" data-left="${Math.round(left)}" data-place="${esc(u.place || 'mac')}"${u.pack ? ' data-pack="1"' : ''}>${u.done >= 0.01 ? 'Download the rest' : 'Download for later'}</button>`;
   }
   return `<div class="un-body"><h2 class="eyebrow">Up next</h2>
     <p class="un-show">${esc(u.title)} · Season ${u.season}</p>
@@ -357,11 +377,121 @@ function tileText(t) {
 // The shelf is three regions, so the figures in its head and foot change without touching the tiles: their images sit
 // in a structure that changes only when the titles do (posters aren't reloaded, the row keeps its scroll), and their
 // text is written separately.
+function spaceBar(used, budget, name) {
+  used = used || 0; budget = budget || 1;
+  return `<span class="bar space" role="img" aria-label="${Math.round(used / budget * 100)}% of the cache ${name ? `on ${esc(name)} ` : ''}used"><b style="width:${Math.min(100, used / budget * 100).toFixed(1)}%"></b></span>`;
+}
+
 function shelfHead(sh) {
   if (!sh) return '<h2 class="eyebrow">On this Mac</h2><p class="muted small">Reading the cache…</p>';
-  const used = sh.used || 0, budget = sh.budget || 1;
-  return `<div class="sh-head"><h2 class="eyebrow">On this Mac</h2><span class="muted small">${bytes(used)} of ${bytes(budget)} · ${bytes(sh.free)} free</span></div>
-    <span class="bar space" role="img" aria-label="${Math.round(used / budget * 100)}% of the cache used"><b style="width:${Math.min(100, used / budget * 100).toFixed(1)}%"></b></span>`;
+  const button = `<button class="ghost" type="button" data-storage aria-expanded="${storageOpen}" aria-controls="shelf-store">Storage</button>`;
+  const places = sh.places || [];
+  if (places.length < 2) {
+    return `<div class="sh-head"><h2 class="eyebrow">On this Mac</h2><span class="muted small">${bytes(sh.used || 0)} of ${bytes(sh.budget || 1)} · ${bytes(sh.free)} free</span>${button}</div>
+    ${spaceBar(sh.used, sh.budget)}`;
+  }
+  return `<div class="sh-head"><h2 class="eyebrow">On this Mac</h2>${button}</div>
+    <ul class="places">${places.map((p) => `<li><span class="pl-name">${esc(p.name)}</span>
+      <span class="muted small">${p.available ? `${bytes(p.used || 0)} of ${bytes(p.budget)} · ${bytes(p.free)} free` : esc(p.why || 'Not connected')}</span>
+      ${p.available ? spaceBar(p.used, p.budget, p.name) : ''}</li>`).join('')}</ul>`;
+}
+
+// ---------------------------------------------------------------- the Storage panel
+
+var storageOpen = false;     // (var: the page tests reach it)
+var pendingGB = {};          // place id -> the limit being set, until it is saved
+const STEP_GB = 5;
+
+// Whole steps of what fits on a place's disk: what the cache keeps there now, plus its free space less what stays free.
+function roomGB(p, keep) {
+  return p.available && p.free != null ? Math.floor(((p.used || 0) + p.free - (keep || 0)) / GB / STEP_GB) * STEP_GB : null;
+}
+
+function storeHTML(st) {
+  if (!storageOpen || !st) return '';
+  const ext = st.places.find((p) => p.id === 'external');
+  const opts = [`<option value="mac"${st.choice === 'mac' ? ' selected' : ''}>This Mac</option>`];
+  if (ext) opts.push(`<option value="external"${st.choice === 'external' ? ' selected' : ''}>${esc(ext.name)}${ext.available ? '' : ' (not connected)'}</option>`);
+  for (const v of st.volumes || []) opts.push(`<option value="vol:${esc(v.path)}">${esc(v.name)}</option>`);
+  const dest = opts.length > 1
+    ? `<label class="st-dest" for="store-dest">Downloads for later go to <select id="store-dest">${opts.join('')}</select></label>`
+    : '<p class="muted small">Connect an external drive to keep downloads for later on it.</p>';
+  const limits = st.places.map((p) => {
+    const saved = p.budget / GB, gb = pendingGB[p.id] ?? saved, room = roomGB(p, st.keep);
+    const top = room == null ? Infinity : Math.max(room, saved, STEP_GB);
+    const hint = !p.available ? esc(p.why || 'Not connected') : room != null ? `room for ${room} GB` : '';
+    return `<li class="st-limit"><span class="st-name">${esc(p.name)}</span>
+      <span class="stepper"><button class="ghost" type="button" data-step-gb="${p.id}" data-by="-1" aria-label="Keep less on ${esc(p.name)}"${gb <= STEP_GB ? ' disabled' : ''}>−</button>
+        <output aria-label="${esc(p.name)} keeps up to">${nf.format(gb)} GB</output>
+        <button class="ghost" type="button" data-step-gb="${p.id}" data-by="1" aria-label="Keep more on ${esc(p.name)}"${gb >= top ? ' disabled' : ''}>+</button>
+        ${gb !== saved ? `<button class="solid" type="button" data-save-gb="${p.id}">Save</button>` : ''}</span>
+      <span class="muted small">${hint}</span></li>`;
+  }).join('');
+  const where = st.choice === 'external' && ext
+    ? `Downloads for later go to ${esc(ext.name)} while it's connected, and stay on this Mac while it isn't.`
+    : 'Downloads for later stay on this Mac.';
+  const there = ext ? ` A torrent already on ${esc(ext.name)} plays from it.` : '';
+  return `<div class="store" id="store"><h2 class="eyebrow">Storage</h2>${dest}<ul class="st-limits" aria-label="What each place keeps at most">${limits}</ul>
+    <p class="muted small">New streams are cached on this Mac, where skipping ahead is instant. ${where}${there} Past its limit, a place deletes its oldest downloads not in use.</p>
+    ${note('storage')}</div>`;
+}
+
+function stepGB(id, by) {
+  const st = STATE && STATE.storage, p = st && st.places.find((x) => x.id === id);
+  if (!p) return;
+  const saved = p.budget / GB, cur = pendingGB[id] ?? saved, room = roomGB(p, st.keep);
+  const top = room == null ? Infinity : Math.max(room, saved, STEP_GB);
+  const next = by > 0 ? Math.min(top, Math.floor(cur / STEP_GB) * STEP_GB + STEP_GB) : Math.max(STEP_GB, Math.ceil(cur / STEP_GB) * STEP_GB - STEP_GB);
+  if (next === saved) delete pendingGB[id]; else pendingGB[id] = next;
+  put('shelf-store', storeHTML(st));
+}
+
+async function saveGB(id) {
+  const st = STATE && STATE.storage, p = st && st.places.find((x) => x.id === id), gb = pendingGB[id];
+  if (!p || gb == null) return;
+  const cut = (p.used || 0) - gb * GB;
+  if (cut > 0 && !confirm(`Keep at most ${gb} GB on ${placeWord(p)}? The oldest downloads not in use there (about ${bytes(cut)}) are deleted to make room.`)) return;
+  const out = await act('/ui/api/storage', { place: id, budget_gb: gb }, 'storage');
+  if (out && out.ok) delete pendingGB[id];
+  if (STATE) put('shelf-store', storeHTML(STATE.storage));
+}
+
+async function chooseDest(value) {
+  const st = STATE && STATE.storage, ext = st && st.places.find((p) => p.id === 'external');
+  const v = ((st && st.volumes) || []).find((x) => `vol:${x.path}` === value);
+  let out = null;
+  if (value === 'mac' || value === 'external') out = await act('/ui/api/storage', { downloads_to: value }, 'storage');
+  else if (v && (!ext || confirm(`Keep downloads for later on ${v.name} instead of ${ext.name}? What is on ${ext.name} stays there, unused while ${v.name} is chosen.`))) {
+    out = await act('/ui/api/storage', { downloads_to: 'external', volume: v.path }, 'storage');
+  }
+  // The menu shows what the person picked; whatever came of it, show what is saved.
+  const el = $('shelf-store');
+  if (el) el.__html = null;
+  if (STATE) put('shelf-store', storeHTML(STATE.storage));
+  return out;
+}
+
+// Where a download for later goes, for a torrent in place `from`: the drive while it's chosen, else where the torrent is.
+function placeFor(from) {
+  const st = STATE && STATE.storage;
+  if (!st) return null;
+  const id = st.dest.id === 'external' ? 'external' : (from || 'mac');
+  return st.places.find((p) => p.id === id) || null;
+}
+const placeWord = (p) => (p.id === 'mac' ? 'this Mac' : p.name);
+const placeName = (id) => {
+  const p = id && id !== 'mac' && STATE && STATE.storage && STATE.storage.places.find((x) => x.id === id);
+  return p ? p.name : 'the Mac';
+};
+
+function downloadPrompt(ds) {
+  const left = Number(ds.left), to = placeFor(ds.place), c = STATE && STATE.shelf;
+  const lim = to || (c && { id: 'mac', name: 'This Mac', used: c.used, budget: c.budget });
+  const over = lim && lim.used + left > lim.budget
+    ? ` That takes the downloads on ${placeWord(lim)} past their ${bytes(lim.budget)} limit, so the oldest ones not in use are deleted to make room.` : '';
+  const moves = to && to.id !== (ds.place || 'mac')
+    ? ` The torrent moves there from this Mac first.${ds.pack ? ` Its other episodes then play from ${to.name} too: one you haven't downloaded takes longer to start the first time, about a second per GB.` : ''}` : '';
+  return `Download ${ds.label} (${bytes(left)}) to ${lim ? placeWord(lim) : 'this Mac'} for later?${moves} It downloads whenever the TV doesn't need the bandwidth.${over}`;
 }
 
 function shelfTiles(sh) {
@@ -372,7 +502,8 @@ function shelfTiles(sh) {
 
 function shelfFoot(sh) {
   if (!sh) return '';
-  return `${sh.idle_count ? `<button class="ghost danger wide" type="button" data-clear="${sh.idle_count}" data-size="${esc(bytes(sh.idle_bytes))}">Delete everything not in use (${bytes(sh.idle_bytes)})</button>` : ''}
+  const where = ['this Mac', ...(sh.places || []).filter((p) => p.id !== 'mac' && p.available).map((p) => p.name)].join(' and ');
+  return `${sh.idle_count ? `<button class="ghost danger wide" type="button" data-clear="${sh.idle_count}" data-size="${esc(bytes(sh.idle_bytes))}" data-where="${esc(where)}">Delete everything not in use (${bytes(sh.idle_bytes)})</button>` : ''}
     ${note('shelf')}`;
 }
 
@@ -394,7 +525,7 @@ function actionsFor(x) {
   const del = `<button class="ghost danger" type="button" data-delfile="${esc(x.ih)}" data-idx="${x.idx}" data-label="${esc(label)}" data-size="${esc(bytes(x.length * x.done))}">Delete</button>`;
   if (x.done >= 1) return del;
   const left = x.length * (1 - x.done);
-  const get = `<button class="${x.next ? 'solid' : 'ghost'}" type="button" data-get="${esc(x.ih)}" data-idx="${x.idx}" data-label="${esc(label)}" data-left="${Math.round(left)}">${x.done >= 0.01 ? 'Download the rest' : 'Download'}</button>`;
+  const get = `<button class="${x.next ? 'solid' : 'ghost'}" type="button" data-get="${esc(x.ih)}" data-idx="${x.idx}" data-label="${esc(label)}" data-left="${Math.round(left)}" data-place="${esc(x.place || 'mac')}"${x.pack ? ' data-pack="1"' : ''}>${x.done >= 0.01 ? 'Download the rest' : 'Download'}</button>`;
   return x.done >= 0.01 ? del + get : get;
 }
 
@@ -402,23 +533,26 @@ function episodeRow(e) {
   const j = e.job;
   let state;
   if (j && ACTIVE.includes(j.state)) state = `<span class="bar"><b style="width:${(e.done * 100).toFixed(1)}%"></b></span>${esc(jobLine(j))}`;
-  else if (e.done >= 1) state = `${lv('good', '')} On the Mac · ${bytes(e.length)}`;
+  else if (e.done >= 1) state = `${lv('good', '')} On ${esc(placeName(e.place))} · ${bytes(e.length)}`;
   else if (e.done >= 0.01) state = `${pct(e.done)}% here · ${bytes(e.length)}`;
-  else state = `Not on the Mac · ${bytes(e.length)}`;
+  else state = `Not on ${esc(placeName(e.place))} · ${bytes(e.length)}`;
   return `<li class="ep${e.done >= 0.01 ? ' here' : ''}"><span class="ep-n">${e.episode}</span>
     <span class="ep-t">${esc(e.name || e.label)}${e.tag ? ` <span class="tag">${esc(e.tag)}</span>` : ''}</span>
     <span class="ep-s">${state}</span><span class="ep-a">${actionsFor(e)}</span>${note(`${e.ih}:${e.idx}`)}</li>`;
 }
 
-function releaseCard(r, budget) {
+function releaseCard(r) {
   const v = r.verdict, name = r.group || r.name;
   const left = r.length * (1 - r.done);
-  const fits = r.bytes + left <= budget;
+  // Measured against the place it would download to; without the storage figures, this Mac's cache.
+  const to = placeFor(r.place);
+  const budget = to ? to.budget : (STATE && STATE.shelf && STATE.shelf.budget) || Infinity;
+  const fits = (r.when_done ?? r.bytes + left) <= budget;
   const running = r.job && ACTIVE.includes(r.job.state);
   const key = `${r.ih}:${r.idx}`;
   const del = `<button class="ghost danger" type="button" data-del="${esc(r.ih)}" data-key="${esc(key)}" data-label="${esc(name)}" data-size="${esc(bytes(r.bytes))}">Delete</button>`;
   const get = !running && r.done < 1 && fits && r.length
-    ? `<button class="ghost" type="button" data-get="${esc(r.ih)}" data-idx="${r.idx}" data-label="${esc(name)}" data-left="${Math.round(left)}">Download the rest</button>` : '';
+    ? `<button class="ghost" type="button" data-get="${esc(r.ih)}" data-idx="${r.idx}" data-label="${esc(name)}" data-left="${Math.round(left)}" data-place="${esc(r.place || 'mac')}">Download the rest</button>` : '';
   const act = running ? `<button class="ghost" type="button" data-cancel="${esc(r.ih)}" data-idx="${r.idx}">Cancel</button>`
     : r.busy || r.in_use ? '<span class="muted small">In use</span>' : del + get;
   const now = STATE ? STATE.now : Date.now() / 1000;
@@ -426,8 +560,8 @@ function releaseCard(r, budget) {
     ${r.chips.length ? `<ul class="chips">${r.chips.map((c) => `<li>${esc(c)}</li>`).join('')}</ul>` : ''}
     ${v ? `<p class="verdict"><span class="sym sym-${SYM[v.symbol] || 'warn'}" aria-hidden="true">${esc(v.symbol)}</span> ${esc(verdictText(v))}</p>` : ''}
     <span class="bar"><b style="width:${(r.done * 100).toFixed(1)}%"></b></span>
-    <div class="rel-f"><span class="muted">${r.job && ACTIVE.includes(r.job.state) ? esc(jobLine(r.job)) : `${bytes(r.length * r.done)} of ${bytes(r.length)} here (${pct(r.done)}%)`}</span>${act}</div>
-    ${!fits && r.done < 1 ? `<p class="muted small">Too big to download fully: the cache keeps ${bytes(budget)}.</p>` : ''}
+    <div class="rel-f"><span class="muted">${r.job && ACTIVE.includes(r.job.state) ? esc(jobLine(r.job)) : `${bytes(r.length * r.done)} of ${bytes(r.length)} ${r.place && r.place !== 'mac' ? `on ${esc(r.place_name)}` : 'here'} (${pct(r.done)}%)`}</span>${act}</div>
+    ${!fits && r.done < 1 ? `<p class="muted small">Too big to download fully: ${to ? esc(to.name) : 'the cache'} keeps ${bytes(budget)}. <button class="link" type="button" data-open-storage>Change the limit</button></p>` : ''}
     ${note(key)}</li>`;
 }
 
@@ -444,10 +578,9 @@ function seasonsHTML(t, season) {
 }
 
 function sheetBody(t, season) {
-  const budget = (STATE && STATE.shelf && STATE.shelf.budget) || Infinity;
   const all = t.in_use ? '' : `<div class="sheet-foot"><button class="ghost danger wide" type="button" data-delall="${esc(t.key)}" data-size="${esc(bytes(t.bytes))}">${t.kind === 'series' ? `Delete all episodes (${bytes(t.bytes)})` : `Delete all ${t.releases.length} release${t.releases.length === 1 ? '' : 's'} (${bytes(t.bytes)})`}</button>${note(t.key)}</div>`;
   if (t.kind === 'series') return `<ul class="eps">${t.episodes.filter((e) => e.season === season).map(episodeRow).join('')}</ul>${all}`;
-  return `<ul class="rels">${t.releases.map((r) => releaseCard(r, budget)).join('')}</ul>${all}`;
+  return `<ul class="rels">${t.releases.map((r) => releaseCard(r)).join('')}</ul>${all}`;
 }
 
 let sheetKey = null, sheetSeason = null, opener = null;
@@ -499,10 +632,13 @@ async function act(path, body, key) {
     const out = await r.json();
     if (out.ok && !out.freed) delete notes[key];
     else notes[key] = { text: out.ok ? `${out.message}, ${bytes(out.freed)} freed.` : out.message, at: Date.now() };
+    await poll();
+    return out;
   } catch (e) {
     notes[key] = { text: 'The server didn\'t answer. Nothing changed.', at: Date.now() };
   }
-  poll();
+  await poll();
+  return null;
 }
 
 // ---------------------------------------------------------------- from the swarm to the TV, recent, the log
@@ -578,6 +714,7 @@ function render(state) {
   put('upnext-bg', u ? backdrop(u.backdrop, u.poster) : '');
   put('upnext', upNextHTML(u));
   put('shelf-head', shelfHead(state.shelf));
+  put('shelf-store', storeHTML(state.storage));
   put('shelf-tiles', shelfTiles(state.shelf));
   put('shelf-foot', shelfFoot(state.shelf));
   for (const t of (state.shelf && state.shelf.items) || []) put(tileId(t.key), tileText(t));
@@ -629,11 +766,22 @@ document.addEventListener('click', (ev) => {
   const open = t.closest('[data-open]');
   if (open) { opener = open; history.pushState({ sheet: true }, '', `#title=${encodeURIComponent(open.dataset.open)}`); renderSheet(); return; }
   if (t.closest('[data-close]')) { closeSheet(); return; }
+  const store = t.closest('[data-storage], [data-open-storage]');
+  if (store) {
+    storageOpen = store.hasAttribute('data-open-storage') || !storageOpen;
+    if (store.hasAttribute('data-open-storage')) closeSheet();
+    if (STATE) { put('shelf-head', shelfHead(STATE.shelf)); put('shelf-store', storeHTML(STATE.storage)); }
+    const panel = $('store');
+    if (storageOpen && panel && panel.scrollIntoView) panel.scrollIntoView({ block: 'nearest' });
+    return;
+  }
+  const step = t.closest('[data-step-gb]');
+  if (step) { stepGB(step.dataset.stepGb, Number(step.dataset.by)); const again = document.querySelector(`[data-step-gb="${step.dataset.stepGb}"][data-by="${step.dataset.by}"]`); if (again && !again.disabled) again.focus(); return; }
+  const save = t.closest('[data-save-gb]');
+  if (save) { saveGB(save.dataset.saveGb); return; }
   const get = t.closest('[data-get]');
   if (get) {
-    const left = Number(get.dataset.left), c = STATE && STATE.shelf;
-    const over = c && c.used + left > c.budget ? ` That takes the downloads past their ${bytes(c.budget)} limit, so the oldest ones not in use are deleted to make room.` : '';
-    if (confirm(`Download ${get.dataset.label} (${bytes(left)}) to this Mac for later? It downloads whenever the TV doesn't need the bandwidth.${over}`)) {
+    if (confirm(downloadPrompt(get.dataset))) {
       act('/ui/api/prefetch', { ih: get.dataset.get, idx: Number(get.dataset.idx) }, `${get.dataset.get}:${get.dataset.idx}`);
     }
     return;
@@ -661,12 +809,13 @@ document.addEventListener('click', (ev) => {
     return;
   }
   const clr = t.closest('[data-clear]');
-  if (clr && confirm(`Delete ${clr.dataset.clear} downloaded torrent${clr.dataset.clear === '1' ? '' : 's'} (${clr.dataset.size})? Anything playing now is kept.`)) {
+  if (clr && confirm(`Delete ${clr.dataset.clear} downloaded torrent${clr.dataset.clear === '1' ? '' : 's'} (${clr.dataset.size}) from ${clr.dataset.where || 'this Mac'}? Anything playing or downloading now is kept.`)) {
     act('/ui/api/cache/clear', {}, 'shelf');
   }
 });
 document.addEventListener('change', (ev) => {
   if (ev.target && ev.target.id === 'season-pick') { sheetSeason = Number(ev.target.value); renderSheet(); }
+  if (ev.target && ev.target.id === 'store-dest') chooseDest(ev.target.value);
 });
 window.addEventListener('popstate', renderSheet);
 window.addEventListener('hashchange', renderSheet);

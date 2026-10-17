@@ -114,7 +114,8 @@ this. Torrent results from every addon (Torrentio, MediaFusion, AIOStreams…) g
 - Every piece is verified against the torrent's hashes before it is sent to the TV.
 - Downloaded pieces stay in `~/.stremio-local-addon/torrent-cache/`, so rewinding and re-watching are
   served from disk. Torrents nobody has used for a while are deleted oldest-first once the cache passes
-  **15 GB**, or whenever the disk drops below 3 GB free.
+  **15 GB**, or whenever the disk drops below 3 GB free. Change the limit on the dashboard, under **Storage**.
+- Downloads for later can go to an external drive instead (see below).
 - If Stremio desktop is closed, torrents still play (the TV's status checks are answered from the last
   time it was open); only transcoding and subtitle conversion need it running.
 
@@ -129,7 +130,8 @@ this. Torrent results from every addon (Torrentio, MediaFusion, AIOStreams…) g
   it with `{"download_limit_mbps": 0}`.
 
 Settings live at the top of `torrent_server.py`; override any of them in
-`~/.stremio-local-addon/torrentd.json`, e.g. `{"cache_budget_gb": 30}`, then restart it.
+`~/.stremio-local-addon/torrentd.json`, e.g. `{"download_limit_mbps": 0}`, then restart it. The dashboard's Storage
+panel writes its settings there too, and they apply at once.
 `https://<host>:12472/torrentd/health` shows active torrents, speeds and cache use.
 
 To go back to Stremio's own server, set the TV's Server URL to `:12470` again.
@@ -222,12 +224,15 @@ Settings in `advisor.json`:
   ready ahead of you"), and the episode drawn as a player's scrubber — what is downloaded, where the TV is, the buffered stretch
   ahead. Any problem — a stall, a slow Wi-Fi link, a player error on the TV, a service down — goes to the top of the page in one
   sentence, with what to do about it.
-- **Up next**: the episode after the one you're watching (or watched last), with a button to download it to this Mac for later —
+- **Up next**: the episode after the one you're watching (or watched last), with a button to download it for later —
   one file at a time, at the lowest priority, pausing whenever a stream is short of buffer or the disk is down to the space kept
   free; refused when it wouldn't fit. A downloaded episode stays as long as the cache budget allows.
 - **On this Mac**: one card per show or movie. A show's card opens its season with every episode of the pack — on the Mac,
   downloading, or not here — each with its one action (Download, Cancel, Delete). A movie's card lists its releases with whether
-  each plays on your TV (the same ✓✓ / ✓ / ⚠ / ✗ as the stream cards), how much of it is here, and Delete.
+  each plays on your TV (the same ✓✓ / ✓ / ⚠ / ✗ as the stream cards), how much of it is here, and Delete. Above the cards,
+  how much each place keeps (this Mac, and the external drive if you use one), and **Storage**: the most each place keeps, in
+  5 GB steps up to what its disk has room for, and where downloads for later go. Lowering a limit below what is kept there asks
+  first, then deletes the oldest downloads not in use.
 - **From the swarm to your TV**: the path a stream takes — the swarm, this Mac (with the torrent server, the library, the Stream
   Advisor and your Stremio account), the Wi-Fi, the TV — each step with its health and, on tap, its details. When something is
   wrong, the weak step says why.
@@ -240,6 +245,36 @@ it from other devices on your network, add `"dashboard_lan": true` to `~/.stremi
 the torrent server; the menu bar then offers the address to copy —
 `https://<your-dashed-ip>.<your-hash>.stremio.rocks:12472/ui`, the same host the TV uses. Nothing is collected
 while nobody has the page open.
+
+### Downloads on an external drive
+
+A movie bigger than the Mac can spare can be downloaded for later onto an external drive. Connect it, open the dashboard's
+**Storage** panel and pick it under *Downloads for later go to*. From then on:
+
+- **Download for later** puts the file on the drive, in a `Stremio Sidecar cache` folder at its top. A torrent that is
+  on the Mac (because the TV started playing it) is moved there first — once it hasn't been played for a minute, so the
+  TV isn't between two requests or two episodes; if the TV asks for it mid-move anyway, the move stops and is tried
+  again later. If the drive already holds a copy with everything the Mac's has, that one is kept; if each holds
+  something the other lacks, both stay.
+- The drive keeps up to its own limit (50 GB to start with; change it under Storage), with the same rules as the Mac: the
+  oldest downloads not in use go first, and never what is playing or still downloading.
+- What the TV starts streaming is cached on the Mac, and so is what you download for later while the drive is away. A
+  torrent already on the drive stays there, even with *This Mac* picked.
+- The TV plays what is on the drive straight from it — a season pack moved there plays all its episodes from there. Unplug
+  the drive and what it holds is simply not there: played again, a movie starts over on the Mac, and the drive's copy is
+  used again once it is back (the Mac's copy is then deleted, if it holds nothing the drive's lacks).
+
+Most external drives come formatted exFAT, which can't skip empty space in a file the way the Mac's own disk does: before
+anything is written far into a file, everything up to that point has to be written out first, and reading the file waits
+meanwhile. That is why new streams are cached on the Mac (a player reads the end of a file as it starts, and a 20 GB movie
+would freeze for half a minute), and why a file downloaded for later onto such a drive is first written out to its full
+length — the job says *Setting aside 20 GB on …* for that half minute — so nothing it downloads later has to wait. The
+cost shows in season packs on the drive: an episode you haven't downloaded for later takes longer to start the first time
+it plays, about a second per GB. The server checks on the drive from a thread of its own, so a drive that is slow to
+answer only holds up what plays from it.
+
+macOS asks before a background program uses a removable drive. If the dashboard says *macOS isn't letting the torrent
+server use* the drive, allow Python to use removable volumes in System Settings → Privacy & Security → Files and Folders.
 
 ### Menu bar icon
 

@@ -8,6 +8,7 @@ import time
 
 from media_text import GB, MB, SAMPLE, VIDEO, clock, episode_key, episode_label, episode_title, release_group, size, spoken
 from prefetch import ACTIVE
+from storage import DENIED
 
 LEVELS = {'idle': 0, 'good': 1, 'warn': 2, 'bad': 3}
 
@@ -37,10 +38,10 @@ def _title(key, rows, titles, jobs):
     rows = sorted(rows, key=lambda r: -r['last_used'])
     info = next((titles[r['ih']] for r in rows if titles.get(r['ih'])), {})
     meta = titles.get('meta:' + info['imdb'], {}) if info.get('imdb') else {}
-    episodes = [_episode_row(r, f, meta, jobs) for r in rows for f in r.get('videos') or []
-                if episode_key(f['name']) and not SAMPLE.search(f['name'])]
+    episodes = [_episode_row(r, f, meta, jobs) for r in rows for f in _episodes(r)]
     kind = info.get('type') or ('series' if episodes else 'movie')
     t = {'key': key, 'title': info.get('name') or rows[0]['name'], 'kind': kind if episodes or kind == 'movie' else 'movie',
+         'where': _where(rows),
          'year': str(info['year']) if info.get('year') else None, 'poster': info.get('poster'), 'backdrop': meta.get('background'),
          'bytes': sum(r['bytes'] for r in rows), 'last_used': max(r['last_used'] for r in rows),
          'in_use': any(r['in_use'] for r in rows), 'ihs': [r['ih'] for r in rows], 'episodes': [], 'seasons': [], 'releases': []}
@@ -52,13 +53,25 @@ def _title(key, rows, titles, jobs):
         episodes.sort(key=lambda e: (e['season'], e['episode'], e['tag'] or ''))
         t.update(episodes=episodes, seasons=sorted({e['season'] for e in episodes}))
         group = release_group(rows[0]['name'])
-        t['meta_line'] = ' · '.join(x for x in (t['year'], group, size(t['bytes']) + ' here') if x)
+        t['meta_line'] = ' · '.join(x for x in (t['year'], group, f"{size(t['bytes'])} {t['where']}") if x)
     else:
         t['releases'] = [_release(r, titles, jobs) for r in rows]
         n = len(t['releases'])
-        t['meta_line'] = ' · '.join(x for x in (t['year'], 'Movie', f'{n} releases' if n > 1 else None, size(t['bytes']) + ' here') if x)
+        t['meta_line'] = ' · '.join(x for x in (t['year'], 'Movie', f'{n} releases' if n > 1 else None, f"{size(t['bytes'])} {t['where']}") if x)
     t['summary'], t['sub'] = _summary(t)
     return t
+
+
+def _where(rows):
+    """'here' (this Mac), 'on Extreme SSD', or 'here and on Extreme SSD': where a title's torrents are."""
+    drives = sorted({r['place_name'] for r in rows if r.get('place', 'mac') != 'mac'})
+    if not drives:
+        return 'here'
+    return ('here and ' if any(r.get('place', 'mac') == 'mac' for r in rows) else '') + 'on ' + ' and '.join(drives)
+
+
+def _episodes(row):
+    return [f for f in row.get('videos') or [] if episode_key(f['name']) and not SAMPLE.search(f['name'])]
 
 
 def _episode_row(row, f, meta, jobs):
@@ -68,7 +81,8 @@ def _episode_row(row, f, meta, jobs):
             'name': (meta.get('episodes') or {}).get(f'{s}:{e}') or episode_title(f['name']),
             'file': f['name'], 'ih': row['ih'], 'idx': f['idx'], 'length': f['length'],
             'done': max(f['done'], job['done']) if job else f['done'], 'busy': bool(f.get('busy')), 'job': job,
-            'release': release_group(row['name']) or row['name'], 'tag': None, 'next': False}
+            'release': release_group(row['name']) or row['name'], 'tag': None, 'next': False, 'place': row.get('place', 'mac'),
+            'pack': len(_episodes(row)) > 1}
 
 
 def _mark_next(episodes):
@@ -93,7 +107,9 @@ def _release(r, titles, jobs):
             'chips': rec.get('label') or ([ext.group(1).upper()] if ext else []), 'verdict': rec.get('verdict'),
             'length': main['length'] if main else 0, 'done': max(done, job['done']) if job else done,
             'bytes': r['bytes'], 'last_used': r['last_used'], 'in_use': r['in_use'], 'busy': bool(main and main.get('busy')),
-            'job': job}
+            'job': job, 'place': r.get('place', 'mac'), 'place_name': r.get('place_name', 'This Mac'),
+            # What the torrent takes once its video is downloaded: the video at its full length instead of what it has.
+            'when_done': r['bytes'] - (main.get('alloc') or 0) + main['length'] if main else r['bytes']}
 
 
 def _summary(t):
@@ -112,15 +128,15 @@ def _summary(t):
             return 'Nothing downloaded', sub
         seasons = sorted({s for s, _ in here})
         span = f'S{seasons[0]}' if len(seasons) == 1 else f'S{seasons[0]}–S{seasons[-1]}'
-        return f"{span} · {len(here)} episode{'s' if len(here) != 1 else ''} here", sub
+        return f"{span} · {len(here)} episode{'s' if len(here) != 1 else ''} {t['where']}", sub
     rel = t['releases']
     if len(rel) > 1:
         return f"Movie · {len(rel)} releases · {size(t['bytes'])}", sub
     r = rel[0]
     if r['done'] >= 1:
-        return f"Movie · on the Mac · {size(r['length'])}", sub
+        return f"Movie · on {'the Mac' if r['place'] == 'mac' else r['place_name']} · {size(r['length'])}", sub
     if r['done'] >= 0.01:
-        return f"Movie · {int(r['done'] * 100)}% here · {size(t['bytes'])}", sub
+        return f"Movie · {int(r['done'] * 100)}% {t['where']} · {size(t['bytes'])}", sub
     return 'Movie · nothing downloaded', sub
 
 
@@ -156,7 +172,8 @@ def _next_card(t, ih, idx, file_name, length, done, s, jobs):
         state = 'not_here'
     return {'key': t.get('key'), 'ih': ih, 'idx': idx, 'title': t.get('title') or s.get('title'), 'season': season, 'episode': episode,
             'label': episode_label(file_name), 'name': e.get('name') or episode_title(file_name), 'length': length, 'done': done,
-            'job': job, 'state': state, 'poster': t.get('poster') or s.get('poster'), 'backdrop': t.get('backdrop')}
+            'job': job, 'state': state, 'poster': t.get('poster') or s.get('poster'), 'backdrop': t.get('backdrop'),
+            'place': e.get('place', 'mac'), 'pack': e.get('pack', True)}
 
 
 def _step(id_, name, level, line, reason=None, advice=None, details=(), services=None):
@@ -280,6 +297,8 @@ def mac_step(server, cache, library, min_free, checked=True, cert=None):
          'text': acct['text'] if acct else 'Not checked yet'},
     ]
     used, budget, free = cache.get('used') or 0, cache.get('budget') or 0, cache.get('free')
+    drives = [p for p in cache.get('places') or [] if p['id'] != 'mac']
+    denied = next((p for p in drives if p['why'] == DENIED), None)
     line = f"up {spoken(server.get('uptime_s') or 0)} · cache {size(used)} of {size(budget)}" + (f' · {size(free)} free' if free is not None else '')
     reason = advice = None
     expired = cert and cert['level'] == 'bad'
@@ -293,6 +312,10 @@ def mac_step(server, cache, library, min_free, checked=True, cert=None):
     elif acct and not acct['ok']:
         reason = acct['text']
         advice = 'Sign in to Stremio desktop on this Mac.' if 'signed out' in acct['text'] else None
+    elif denied:
+        reason = f"macOS isn't letting the torrent server use {denied['name']}"
+        advice = ('Downloads for later stay on this Mac until it does. In System Settings → Privacy & Security → Files and '
+                  'Folders, let Python use removable volumes.')
     elif free is not None and free < min_free:
         reason, advice = f'Only {size(free)} free on the disk', 'Delete downloads you\'ve watched to make room.'
     level = 'bad' if expired else 'warn' if reason else 'good'
@@ -300,6 +323,10 @@ def mac_step(server, cache, library, min_free, checked=True, cert=None):
     details = [('Running for', spoken(server.get('uptime_s') or 0)), ('Download limit', f'{cap} Mbps' if cap else 'none'),
                ('Torrent cache', f'{size(used)} of {size(budget)}'), ('Free disk', size(free) if free is not None else '—'),
                ('Learning from plays', 'on' if server.get('learning') else 'off')]
+    for p in drives:
+        details.append((p['name'], (f"{size(p.get('used') or 0)} of {size(p['budget'])}"
+                                    + (f" · {size(p['free'])} free" if p.get('free') is not None else ''))
+                        if p['available'] else p['why'] or 'Not connected'))
     if cert and cert['valid']:
         details.append(('HTTPS certificate', cert['valid']))
     return _step('mac', 'This Mac', level, line, reason, advice, details, services)

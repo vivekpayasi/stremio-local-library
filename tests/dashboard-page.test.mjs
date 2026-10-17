@@ -95,7 +95,7 @@ test('a failed poll keeps the page and says the server is unreachable', async ()
 
 const IH = 'b'.repeat(40);
 const ep = (n, name, done, extra = {}) => ({ season: 1, episode: n, label: `S01E0${n}`, name, file: `Chernobyl - S01E0${n}.mkv`, ih: IH, idx: n,
-  length: 6.4 * GB, done, busy: false, job: null, release: 'Accid', tag: null, next: false, ...extra });
+  length: 6.4 * GB, done, busy: false, job: null, release: 'Accid', tag: null, next: false, pack: true, ...extra });
 const JOB = { ih: IH, idx: 4, label: 'S01E04', state: 'downloading', done: 0.34, length: 6.4 * GB, message: null, mbps: 21.3, eta_s: 1500 };
 export const SERIES = {
   key: 'tt7366338', title: 'Chernobyl', kind: 'series', year: '2019', poster: 'P', backdrop: 'BG', bytes: 3.8 * GB, last_used: 1,
@@ -182,6 +182,141 @@ test('a movie sheet: one card per release with its verdict and how much is here'
   assert.ok(h.includes('Download the rest'), 'the 9 GB one does');
   assert.ok(h.includes('Delete all 2 releases'));
   assert.match(h, /data-del="c{40}" data-key="c{40}:0" data-label="BEN.THE.MEN" data-size="2.4 GB"/, 'Delete removes the release from the Mac');
+});
+
+const MAC = { id: 'mac', name: 'This Mac', budget: 15 * GB, available: true, why: null, used: 4.4 * GB, free: 22 * GB };
+const SSD = { id: 'external', name: 'Extreme SSD', budget: 50 * GB, available: true, why: null, used: 20 * GB, free: 65 * GB };
+export const STORAGE = { places: [MAC, SSD], choice: 'external', dest: { id: 'external', name: 'Extreme SSD', budget: 50 * GB, used: 20 * GB },
+  volumes: [{ path: '/Volumes/Backup', name: 'Backup', free: 400 * GB }], keep: 3 * GB };
+
+test('the shelf head: each place with its own figures, and the Storage button', () => {
+  const { ctx } = page();
+  const h = ctx.shelfHead({ ...SHELF, places: [MAC, SSD] });
+  assert.ok(h.includes('This Mac') && h.includes('4.4 GB of 15 GB · 22 GB free'));
+  assert.ok(h.includes('Extreme SSD') && h.includes('20 GB of 50 GB · 65 GB free'));
+  assert.match(h, /data-storage[^>]*aria-expanded="false"/);
+  assert.ok(ctx.shelfHead({ ...SHELF, places: [MAC, { ...SSD, available: false, why: 'Not connected' }] }).includes('Not connected'));
+  assert.match(ctx.shelfHead(SHELF), /data-storage/, 'without a drive the button is there too');
+});
+
+test('the Storage panel: where downloads for later go, and each place\'s limit in 5 GB steps', () => {
+  const { ctx } = page();
+  ctx.render({ ...STATE, storage: STORAGE });
+  assert.equal(ctx.storeHTML(STORAGE), '', 'folded until the button is pressed');
+  ctx.storageOpen = true;
+  const h = ctx.storeHTML(STORAGE);
+  assert.match(h, /<select id="store-dest">/);
+  assert.match(h, /<option value="external" selected>Extreme SSD<\/option>/);
+  assert.match(h, /<option value="vol:\/Volumes\/Backup">Backup<\/option>/);
+  assert.ok(h.includes('15 GB') && h.includes('50 GB'));
+  assert.ok(!h.includes('data-save-gb'), 'nothing to save yet');
+  ctx.stepGB('mac', 1);
+  assert.ok(ctx.storeHTML(STORAGE).includes('20 GB'));
+  assert.match(ctx.storeHTML(STORAGE), /data-save-gb="mac"/);
+  for (let i = 0; i < 6; i++) ctx.stepGB('mac', -1);
+  assert.ok(ctx.storeHTML(STORAGE).includes('>5 GB<'), 'not below 5 GB');
+  for (let i = 0; i < 20; i++) ctx.stepGB('mac', 1);
+  assert.ok(ctx.storeHTML(STORAGE).includes('>20 GB<'), 'not past the room on the disk: 4.4 used + 22 free - 3 kept');
+  assert.ok(ctx.storeHTML({ ...STORAGE, places: [MAC], volumes: [] }).includes('Connect an external drive'));
+  const away = ctx.storeHTML({ ...STORAGE, places: [MAC, { ...SSD, available: false, why: 'Not connected' }] });
+  assert.match(away, /<option value="external" selected>Extreme SSD \(not connected\)<\/option>/);
+});
+
+test('saving a limit below what is kept there asks first, saying what goes', async () => {
+  const calls = [];
+  const { ctx } = page({ fetch: async (url, opt) => { calls.push([url, opt && JSON.parse(opt.body)]); return { ok: true, json: async () => ({ ok: true, message: 'x' }) }; } });
+  ctx.render({ ...STATE, storage: STORAGE });
+  ctx.storageOpen = true;
+  for (let i = 0; i < 7; i++) ctx.stepGB('external', -1);      // 50 GB down to 15, below the 20 GB kept there
+  let asked = null;
+  ctx.confirm = (m) => { asked = m; return false; };
+  await ctx.saveGB('external');
+  assert.ok(asked && asked.includes('Extreme SSD') && asked.includes('deleted'), asked);
+  assert.equal(calls.filter(([u]) => u === '/ui/api/storage').length, 0, 'declined: nothing sent');
+  ctx.confirm = () => true;
+  await ctx.saveGB('external');
+  assert.deepEqual(calls.find(([u]) => u === '/ui/api/storage')[1], { place: 'external', budget_gb: 15 });
+  assert.ok(!ctx.storeHTML(STORAGE).includes('data-save-gb'), 'saved: nothing pending');
+});
+
+test('the panel is not rewritten when only the figures move, so an open menu stays open', () => {
+  const { ctx } = page();
+  ctx.render({ ...STATE, storage: STORAGE });
+  ctx.storageOpen = true;
+  const moved = { ...STORAGE, places: [{ ...MAC, used: MAC.used + GB, free: MAC.free - GB }, SSD] };
+  assert.equal(ctx.storeHTML(moved), ctx.storeHTML(STORAGE));
+  assert.ok(ctx.storeHTML(STORAGE).includes('A torrent already on Extreme SSD plays from it'), 'what it says of streams is true');
+});
+
+// The server, as the page meets it: an answer to a change, then the state a little later.
+function server(answer, state) {
+  return async (url) => {
+    if (url === '/ui/api/state') for (let i = 0; i < 20; i++) await null;
+    return { ok: true, json: async () => (url === '/ui/api/state' ? state : answer) };
+  };
+}
+
+test('after saving, the panel shows the saved limit at once', async () => {
+  const saved = { ...STORAGE, places: [MAC, { ...SSD, budget: 15 * GB }] };
+  const { ctx, els } = page({ fetch: server({ ok: true, message: 'x' }, { ...STATE, storage: saved }) });
+  ctx.render({ ...STATE, storage: STORAGE });
+  ctx.storageOpen = true;
+  for (let i = 0; i < 7; i++) ctx.stepGB('external', -1);
+  ctx.confirm = () => true;
+  await ctx.saveGB('external');
+  assert.match(els['shelf-store'].innerHTML, /Extreme SSD keeps up to">15 GB</);
+  assert.ok(!els['shelf-store'].innerHTML.includes('data-save-gb'));
+});
+
+test('a drive choice that wasn\'t saved is put back in the menu', async () => {
+  const { ctx, els } = page({ fetch: server({ ok: false, message: 'That drive isn\'t connected' }, { ...STATE, storage: STORAGE }) });
+  ctx.render({ ...STATE, storage: STORAGE });
+  ctx.storageOpen = true;
+  ctx.render({ ...STATE, storage: STORAGE });
+  els['shelf-store'].innerHTML = 'the menu, showing Backup';
+  ctx.confirm = () => true;
+  await ctx.chooseDest('vol:/Volumes/Backup');
+  assert.match(els['shelf-store'].innerHTML, /<option value="external" selected>/);
+});
+
+test('only an episode of a pack says the pack moves with it', () => {
+  const { ctx } = page();
+  assert.match(ctx.sheetBody(SERIES, 1), /data-pack="1"/);
+  const single = { ...SERIES, episodes: SERIES.episodes.map((e) => ({ ...e, pack: false })) };
+  assert.ok(!ctx.sheetBody(single, 1).includes('data-pack="1"'));
+});
+
+test('clearing says it empties the drive too', () => {
+  const { ctx } = page();
+  assert.match(ctx.shelfFoot({ ...SHELF, places: [MAC, SSD] }), /data-where="this Mac and Extreme SSD"/);
+  assert.match(ctx.shelfFoot(SHELF), /data-where="this Mac"/);
+});
+
+test('a release too big for where it would download says so, and leads to Storage', () => {
+  const { ctx } = page();
+  const small = { ...STORAGE, places: [MAC, { ...SSD, budget: 10 * GB }], dest: { ...STORAGE.dest, budget: 10 * GB } };
+  ctx.render({ ...STATE, storage: small });
+  let h = ctx.sheetBody(MOVIE, null);
+  assert.ok(h.includes('Too big to download fully: Extreme SSD keeps 10 GB'), h);
+  assert.match(h, /data-open-storage/);
+  ctx.render({ ...STATE, storage: STORAGE });
+  h = ctx.sheetBody({ ...MOVIE, releases: [{ ...MOVIE.releases[0], when_done: 21.8 * GB }] }, null);
+  assert.ok(!h.includes('Too big') && h.includes('Download the rest'), 'it fits the 50 GB kept on the drive');
+});
+
+test('the download prompt names where it goes, and that the torrent moves there', () => {
+  const { ctx } = page();
+  ctx.render({ ...STATE, storage: STORAGE });
+  const ask = ctx.downloadPrompt({ label: 'BEN.THE.MEN', left: String(19.3 * GB), place: 'mac' });
+  assert.ok(ask.includes('to Extreme SSD') && ask.includes('moves there from this Mac'), ask);
+  const there = ctx.downloadPrompt({ label: 'S01E05', left: String(6 * GB), place: 'external' });
+  assert.ok(there.includes('to Extreme SSD') && !there.includes('moves'), there);
+  ctx.render({ ...STATE, storage: { ...STORAGE, choice: 'mac', dest: { id: 'mac', name: 'This Mac', budget: 15 * GB, used: 4.4 * GB } } });
+  assert.ok(ctx.downloadPrompt({ label: 'S01E05', left: String(6 * GB), place: 'mac' }).includes('to this Mac'));
+  ctx.render({ ...STATE, storage: STORAGE });
+  const pack = ctx.downloadPrompt({ label: 'S01E05', left: String(6 * GB), place: 'mac', pack: '1' });
+  assert.ok(pack.includes('other episodes') && pack.includes('longer to start'), pack);
+  assert.ok(ctx.jobLine({ state: 'moving', message: 'Moving it to Extreme SSD' }).includes('Moving it to Extreme SSD'));
 });
 
 test('a sheet for a title that is gone says so', () => {
